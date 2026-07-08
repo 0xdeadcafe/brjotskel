@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ir-log — Append an audit entry. Requires BRJOTSKEL_AUTH_CONTEXT.
+set -euo pipefail
+
+if [[ -z "${BRJOTSKEL_AUTH_CONTEXT:-}" ]]; then
+  echo "BRJOTSKEL_AUTH_CONTEXT is required" >&2
+  exit 1
+fi
+
+log_dir="${BRJOTSKEL_LOG_DIR:-logs}"
+mkdir -p "$log_dir"
+log_file="$log_dir/audit-$(date -u +%Y%m%d).log"
+
+printf '%s auth=%q event=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BRJOTSKEL_AUTH_CONTEXT" "$*" >> "$log_file"

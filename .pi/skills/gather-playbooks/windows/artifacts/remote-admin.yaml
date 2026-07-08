@@ -1,0 +1,16 @@
+files:
+  - C:\Windows\Temp\*plink*
+  - C:\Windows\Temp\*chisel*
+  - C:\Windows\Temp\*ngrok*
+  - C:\Users\*\AppData\Local\Temp\*plink*
+  - C:\Users\*\AppData\Local\Temp\*chisel*
+  - C:\Users\*\AppData\Local\Temp\*ngrok*
+  - C:\Users\*\Downloads\*.rdp
+  - C:\Users\*\Downloads\*.ppk
+  - C:\Users\*\.ssh\config
+  - C:\Users\*\.ssh\known_hosts
+registry:
+  - HKCU:\Software\SimonTatham\PuTTY\Sessions
+  - HKCU:\Software\SimonTatham\PuTTY\SshHostKeys
+  - HKCU:\Software\Microsoft\Terminal Server Client\Servers
+  - HKCU:\Software\Microsoft\Terminal Server Client\Default

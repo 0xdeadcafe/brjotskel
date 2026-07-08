@@ -1,0 +1,9 @@
+logs/**
+!logs/.gitkeep
+workspace/**
+!workspace/.gitkeep
+config/targets.yaml
+.env
+temp/
+*.log
+.DS_Store

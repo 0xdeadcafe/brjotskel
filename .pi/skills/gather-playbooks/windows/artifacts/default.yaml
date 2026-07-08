@@ -1,0 +1,18 @@
+files:
+  - C:\Windows\Temp\*.ps1
+  - C:\Windows\Temp\*.bat
+  - C:\Windows\Temp\*.vbs
+  - C:\Users\*\AppData\Local\Temp\*.ps1
+  - C:\Users\*\AppData\Local\Temp\*.bat
+  - C:\Users\*\AppData\Local\Temp\*.vbs
+  - C:\Users\*\Downloads\*.rdp
+  - C:\Users\*\Downloads\*.ppk
+  - C:\Users\*\.ssh\config
+  - C:\Users\*\.ssh\known_hosts
+registry:
+  - HKCU:\Software\SimonTatham\PuTTY\Sessions
+  - HKCU:\Software\SimonTatham\PuTTY\SshHostKeys
+  - HKCU:\Software\Microsoft\Terminal Server Client\Servers
+  - HKCU:\Software\Microsoft\Terminal Server Client\Default
+  - HKCU:\Software\Microsoft\Windows\CurrentVersion\Run
+  - HKLM:\Software\Microsoft\Windows\CurrentVersion\Run

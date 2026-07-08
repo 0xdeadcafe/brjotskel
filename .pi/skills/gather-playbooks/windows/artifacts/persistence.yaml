@@ -1,0 +1,12 @@
+files:
+  - C:\ProgramData\*.exe
+  - C:\ProgramData\*.dll
+  - C:\Users\Public\*.exe
+  - C:\Users\Public\*.dll
+  - C:\inetpub\wwwroot\*.aspx
+  - C:\inetpub\wwwroot\*.ashx
+registry:
+  - HKCU:\Software\Microsoft\Windows\CurrentVersion\Run
+  - HKLM:\Software\Microsoft\Windows\CurrentVersion\Run
+  - HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths
+  - HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes

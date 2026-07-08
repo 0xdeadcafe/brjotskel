@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+import argparse
+
+
+def y(v, indent=0):
+    sp = '  ' * indent
+    if isinstance(v, dict):
+        out = []
+        for k, val in v.items():
+            if isinstance(val, (dict, list)):
+                out.append(f"{sp}{k}:")
+                out.append(y(val, indent + 1))
+            elif val is None:
+                out.append(f"{sp}{k}: null")
+            elif isinstance(val, bool):
+                out.append(f"{sp}{k}: {'true' if val else 'false'}")
+            elif isinstance(val, (int, float)):
+                out.append(f"{sp}{k}: {val}")
+            else:
+                s = str(val)
+                if any(c in s for c in [':', '#', '{', '}', '[', ']', ',', '&', '*']) or s.strip() != s or '\\' in s:
+                    out.append(f'{sp}{k}: "{s.replace("\\", "\\\\").replace("\"", "\\\"")}"')
+                else:
+                    out.append(f"{sp}{k}: {s}")
+        return '\n'.join(out)
+    if isinstance(v, list):
+        out = []
+        for item in v:
+            if isinstance(item, (dict, list)):
+                out.append(f"{sp}-")
+                out.append(y(item, indent + 1))
+            elif item is None:
+                out.append(f"{sp}- null")
+            elif isinstance(item, bool):
+                out.append(f"{sp}- {'true' if item else 'false'}")
+            elif isinstance(item, (int, float)):
+                out.append(f"{sp}- {item}")
+            else:
+                s = str(item)
+                if any(c in s for c in [':', '#', '{', '}', '[', ']', ',', '&', '*']) or s.strip() != s or '\\' in s:
+                    out.append(f'{sp}- "{s.replace("\\", "\\\\").replace("\"", "\\\"")}"')
+                else:
+                    out.append(f"{sp}- {s}")
+        return '\n'.join(out)
+    return f"{sp}{v}"
+
+
+def compact(v):
+    if isinstance(v, dict):
+        out = {}
+        for k, val in v.items():
+            c = compact(val)
+            if c in (None, [], {}):
+                continue
+            out[k] = c
+        return out
+    if isinstance(v, list):
+        out = [compact(x) for x in v]
+        return [x for x in out if x not in (None, [], {})]
+    return v
+
+
+def print_result(category, entry_id, data, summary):
+    data = compact(data)
+    yaml_text = y(data)
+    print("=== YAML ===")
+    print(yaml_text)
+    print("\n=== intel_add ===")
+    print(f'intel_add(category="{category}", id="{entry_id}", data="""{yaml_text}\n""", summary="{summary}")')
+
+
+def add_common_source(obj, args):
+    source = {}
+    if getattr(args, 'source_host', None):
+        source['host'] = args.source_host
+    if getattr(args, 'source_method', None):
+        source['method'] = args.source_method
+    if getattr(args, 'source_path', None):
+        source['path'] = args.source_path
+    if getattr(args, 'source_tool', None):
+        source['tool'] = args.source_tool
+    if getattr(args, 'source_playbook', None):
+        source['playbook'] = args.source_playbook
+    if source:
+        obj['source'] = source
+
+
+def cmd_host(args):
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': args.endpoint or [],
+        'profile_artifacts': args.profile_artifact or [],
+    }
+    if args.access_method:
+        data['access'] = {
+            'method': args.access_method,
+            'credential': args.access_credential,
+            'via': args.access_via,
+            'port': args.access_port,
+        }
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'Profile-derived host artifact recorded: {args.id}')
+
+
+def cmd_credential(args):
+    data = {
+        'type': args.type,
+        'username': args.username,
+        'domain': args.domain,
+        'status': args.status,
+        'valid_on': args.valid_on or [],
+        'related_hosts': args.related_host or [],
+        'notes': args.notes,
+    }
+    if args.secret:
+        data['secret'] = args.secret
+    if args.key_file:
+        data['key_file'] = args.key_file
+    if args.ticket_file:
+        data['ticket_file'] = args.ticket_file
+    add_common_source(data, args)
+    print_result('credential', args.id, data, args.summary or f'Credential artifact recorded: {args.id}')
+
+
+def cmd_pivot(args):
+    chain = [{
+        'hop': args.hop,
+        'method': args.method,
+        'credential': args.credential,
+        'command': args.command,
+        'tunnel': args.tunnel,
+    }]
+    chain = [{k: v for k, v in x.items() if v is not None} for x in chain]
+    data = {
+        'target': args.target,
+        'chain': chain,
+        'status': args.status,
+        'related_hosts': args.related_host or [],
+        'notes': args.notes,
+    }
+    ev = {}
+    if args.evidence_kind:
+        ev['kind'] = args.evidence_kind
+    if args.evidence_host:
+        ev['host'] = args.evidence_host
+    if args.evidence_path:
+        ev['path'] = args.evidence_path
+    if ev:
+        data['evidence'] = [ev]
+    add_common_source(data, args)
+    print_result('pivot', args.id, data, args.summary or f'Profile-derived pivot recorded: {args.id}')
+
+
+def cmd_putty_host(args):
+    endpoint = f"ssh://{args.username}@{args.host}:{args.port}" if args.username else f"ssh://{args.host}:{args.port}"
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname or args.host,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [endpoint],
+        'profile_artifacts': ['putty-session'],
+    }
+    if args.key_file or args.username:
+        data['access'] = {
+            'method': 'ssh',
+            'credential': args.access_credential,
+            'via': args.access_via,
+            'port': args.port,
+        }
+    args.source_method = args.source_method or 'saved PuTTY session'
+    args.source_path = args.source_path or f'HKCU\\Software\\SimonTatham\\PuTTY\\Sessions\\{args.session_name}'
+    args.source_playbook = args.source_playbook or 'windows/putty-sessions.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'PuTTY-derived endpoint recorded: {args.id}')
+
+
+def cmd_ansible_host(args):
+    endpoint = f"ssh://{args.username + '@' if args.username else ''}{args.host}:{args.port}"
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname or args.inventory_name or args.host,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [endpoint],
+        'profile_artifacts': ['ansible-inventory'],
+        'access': {
+            'method': 'ssh',
+            'credential': args.access_credential,
+            'via': args.access_via,
+            'port': args.port,
+        }
+    }
+    args.source_method = args.source_method or 'ansible inventory'
+    args.source_path = args.source_path or '/etc/ansible/hosts'
+    args.source_tool = args.source_tool or 'ansible'
+    args.source_playbook = args.source_playbook or 'linux/ansible-triage.sh'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'Ansible-derived endpoint recorded: {args.id}')
+
+
+def cmd_psreadline_credential(args):
+    data = {
+        'type': args.type,
+        'username': args.username,
+        'domain': args.domain,
+        'status': args.status,
+        'valid_on': args.valid_on or [],
+        'related_hosts': args.related_host or [],
+        'notes': args.notes or f'Observed in PSReadLine history line {args.line_number}' if args.line_number else args.notes,
+    }
+    if args.secret:
+        data['secret'] = args.secret
+    if args.key_file:
+        data['key_file'] = args.key_file
+    args.source_method = args.source_method or 'PSReadLine history'
+    if not args.source_path and args.user_profile:
+        args.source_path = rf'C:\Users\{args.user_profile}\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
+    args.source_playbook = args.source_playbook or 'windows/psreadline-history.ps1'
+    add_common_source(data, args)
+    if args.line_number:
+        data['source'] = data.get('source', {})
+        data['source']['line_number'] = args.line_number
+    print_result('credential', args.id, data, args.summary or f'PSReadLine-derived credential artifact recorded: {args.id}')
+
+
+def cmd_av_path_host(args):
+    endpoint = args.endpoint or f"file://{args.exclusion_path}"
+    data = {
+        'hostname': args.hostname or args.id,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [endpoint],
+        'profile_artifacts': ['av-exclusion'],
+        'notes': f"AV exclusion path observed: {args.exclusion_path}",
+    }
+    args.source_method = args.source_method or 'AV exclusion'
+    args.source_path = args.source_path or args.registry_path or 'HKLM\\SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths'
+    args.source_playbook = args.source_playbook or 'windows/enum-av-exclusions.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'AV exclusion artifact recorded: {args.id}')
+
+
+def cmd_dnscache_host(args):
+    endpoint = f"dns://{args.entry}"
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname or args.entry,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [endpoint],
+        'profile_artifacts': ['dns-cache'],
+        'notes': args.notes or f'DNS cache record type={args.record_type} data={args.data_value}' if (args.record_type or args.data_value) else args.notes,
+    }
+    args.source_method = args.source_method or 'DNS client cache'
+    args.source_playbook = args.source_playbook or 'windows/enum-dnscache.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'DNS-cache-derived host recorded: {args.id}')
+
+
+def cmd_usb_artifact_host(args):
+    data = {
+        'hostname': args.hostname or args.id,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'profile_artifacts': ['usb-history'],
+        'notes': args.notes or f'USB artifact friendly_name={args.friendly_name} container_id={args.container_id}',
+    }
+    args.source_method = args.source_method or 'USB storage history'
+    args.source_path = args.source_path or args.registry_path or 'HKLM\\SYSTEM\\CurrentControlSet\\Enum\\USBSTOR'
+    args.source_playbook = args.source_playbook or 'windows/enum-usb-history.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'USB-history-derived artifact recorded: {args.id}')
+
+
+def cmd_vpn_pivot(args):
+    chain = [{
+        'hop': args.hop,
+        'method': args.method,
+        'credential': args.credential,
+        'command': args.command,
+    }]
+    data = {
+        'target': args.target,
+        'chain': chain,
+        'status': args.status,
+        'related_hosts': args.related_host or [],
+        'notes': args.notes or f'VPN endpoint {args.remote_host}:{args.remote_port}' if args.remote_host else args.notes,
+        'evidence': [{
+            'kind': 'vpn-config',
+            'host': args.source_host,
+            'path': args.source_path or args.config_path,
+        }]
+    }
+    args.source_method = args.source_method or 'VPN config'
+    args.source_path = args.source_path or args.config_path
+    args.source_playbook = args.source_playbook or 'linux/enum-vpn-creds.sh'
+    add_common_source(data, args)
+    print_result('pivot', args.id, data, args.summary or f'VPN-derived pivot recorded: {args.id}')
+
+
+def cmd_ad_account(args):
+    data = {
+        'type': args.type,
+        'domain': args.domain,
+        'username': args.username,
+        'privileges': args.privilege or [],
+        'access_to': args.access_to or [],
+        'credentials': args.credential or [],
+        'related_hosts': args.related_host or [],
+        'attacker_use': args.attacker_use,
+        'status': args.status,
+    }
+    add_common_source(data, args)
+    print_result('account', args.id, data, args.summary or f'AD-derived account recorded: {args.id}')
+
+
+def cmd_rdp_host(args):
+    endpoint = f"rdp://{args.host}"
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname or args.host,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [endpoint],
+        'profile_artifacts': ['rdp-artifact'],
+        'access': {
+            'method': 'rdp',
+            'credential': args.access_credential,
+            'via': args.access_via,
+            'port': 3389,
+        }
+    }
+    args.source_method = args.source_method or 'RDP artifact'
+    args.source_playbook = args.source_playbook or 'windows/enum-browser-artifacts.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'RDP-derived host recorded: {args.id}')
+
+
+def cmd_browser_host(args):
+    data = {
+        'ip': args.ip,
+        'hostname': args.hostname or args.host,
+        'platform': args.platform,
+        'role': args.role,
+        'status': args.status,
+        'attacker_role': args.attacker_role,
+        'endpoints': [args.endpoint],
+        'profile_artifacts': ['browser-artifact'],
+        'notes': args.notes or f'Browser/admin-console artifact from {args.browser}' if args.browser else args.notes,
+    }
+    args.source_method = args.source_method or 'browser artifact'
+    args.source_playbook = args.source_playbook or 'windows/enum-browser-artifacts.ps1'
+    add_common_source(data, args)
+    print_result('host', args.id, data, args.summary or f'Browser-derived host recorded: {args.id}')
+
+
+def cmd_cifs_pivot(args):
+    chain = [{
+        'hop': args.hop,
+        'method': 'cifs',
+        'credential': args.credential,
+        'command': args.command,
+    }]
+    data = {
+        'target': args.target,
+        'chain': chain,
+        'status': args.status,
+        'related_hosts': args.related_host or [],
+        'notes': args.notes or f'CIFS share {args.share_path}',
+        'evidence': [{
+            'kind': 'cifs-config',
+            'host': args.source_host,
+            'path': args.source_path or args.config_path,
+        }]
+    }
+    args.source_method = args.source_method or 'CIFS mount artifact'
+    args.source_path = args.source_path or args.config_path
+    args.source_playbook = args.source_playbook or 'linux/enum-cifs-creds.sh'
+    add_common_source(data, args)
+    print_result('pivot', args.id, data, args.summary or f'CIFS-derived pivot recorded: {args.id}')
+
+
+def main():
+    p = argparse.ArgumentParser(description='Generate ready intel_add snippets from gather-playbook findings.')
+    sub = p.add_subparsers(dest='cmd', required=True)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--source-host')
+    common.add_argument('--source-method')
+    common.add_argument('--source-path')
+    common.add_argument('--source-tool')
+    common.add_argument('--source-playbook')
+    common.add_argument('--summary')
+
+    host = sub.add_parser('host-endpoint', parents=[common])
+    host.add_argument('--id', required=True)
+    host.add_argument('--ip')
+    host.add_argument('--hostname')
+    host.add_argument('--platform', default='unknown')
+    host.add_argument('--role', default='unknown')
+    host.add_argument('--status', default='suspected')
+    host.add_argument('--attacker-role', default='unknown')
+    host.add_argument('--endpoint', action='append')
+    host.add_argument('--profile-artifact', action='append')
+    host.add_argument('--access-method')
+    host.add_argument('--access-credential')
+    host.add_argument('--access-via')
+    host.add_argument('--access-port', type=int)
+    host.set_defaults(func=cmd_host)
+
+    putty = sub.add_parser('putty-host', parents=[common])
+    putty.add_argument('--id', required=True)
+    putty.add_argument('--host', required=True)
+    putty.add_argument('--hostname')
+    putty.add_argument('--ip')
+    putty.add_argument('--username')
+    putty.add_argument('--port', type=int, default=22)
+    putty.add_argument('--platform', default='unknown')
+    putty.add_argument('--role', default='unknown')
+    putty.add_argument('--status', default='suspected')
+    putty.add_argument('--attacker-role', default='unknown')
+    putty.add_argument('--session-name', required=True)
+    putty.add_argument('--key-file')
+    putty.add_argument('--access-credential')
+    putty.add_argument('--access-via')
+    putty.set_defaults(func=cmd_putty_host)
+
+    ans = sub.add_parser('ansible-host', parents=[common])
+    ans.add_argument('--id', required=True)
+    ans.add_argument('--host', required=True)
+    ans.add_argument('--inventory-name')
+    ans.add_argument('--hostname')
+    ans.add_argument('--ip')
+    ans.add_argument('--username')
+    ans.add_argument('--port', type=int, default=22)
+    ans.add_argument('--platform', default='linux')
+    ans.add_argument('--role', default='unknown')
+    ans.add_argument('--status', default='suspected')
+    ans.add_argument('--attacker-role', default='unknown')
+    ans.add_argument('--access-credential')
+    ans.add_argument('--access-via')
+    ans.set_defaults(func=cmd_ansible_host)
+
+    cred = sub.add_parser('credential', parents=[common])
+    cred.add_argument('--id', required=True)
+    cred.add_argument('--type', required=True)
+    cred.add_argument('--username', required=True)
+    cred.add_argument('--domain')
+    cred.add_argument('--secret')
+    cred.add_argument('--key-file')
+    cred.add_argument('--ticket-file')
+    cred.add_argument('--valid-on', action='append')
+    cred.add_argument('--related-host', action='append')
+    cred.add_argument('--status', default='active')
+    cred.add_argument('--notes')
+    cred.set_defaults(func=cmd_credential)
+
+    psh = sub.add_parser('psreadline-credential', parents=[common])
+    psh.add_argument('--id', required=True)
+    psh.add_argument('--type', required=True)
+    psh.add_argument('--username', required=True)
+    psh.add_argument('--domain')
+    psh.add_argument('--secret')
+    psh.add_argument('--key-file')
+    psh.add_argument('--valid-on', action='append')
+    psh.add_argument('--related-host', action='append')
+    psh.add_argument('--status', default='active')
+    psh.add_argument('--notes')
+    psh.add_argument('--user-profile')
+    psh.add_argument('--line-number', type=int)
+    psh.set_defaults(func=cmd_psreadline_credential)
+
+    avh = sub.add_parser('av-path-host', parents=[common])
+    avh.add_argument('--id', required=True)
+    avh.add_argument('--exclusion-path', required=True)
+    avh.add_argument('--endpoint')
+    avh.add_argument('--hostname')
+    avh.add_argument('--platform', default='windows')
+    avh.add_argument('--role', default='unknown')
+    avh.add_argument('--status', default='suspected')
+    avh.add_argument('--attacker-role', default='unknown')
+    avh.add_argument('--registry-path')
+    avh.set_defaults(func=cmd_av_path_host)
+
+    dns = sub.add_parser('dnscache-host', parents=[common])
+    dns.add_argument('--id', required=True)
+    dns.add_argument('--entry', required=True)
+    dns.add_argument('--hostname')
+    dns.add_argument('--ip')
+    dns.add_argument('--platform', default='unknown')
+    dns.add_argument('--role', default='unknown')
+    dns.add_argument('--status', default='suspected')
+    dns.add_argument('--attacker-role', default='unknown')
+    dns.add_argument('--record-type')
+    dns.add_argument('--data-value')
+    dns.add_argument('--notes')
+    dns.set_defaults(func=cmd_dnscache_host)
+
+    usb = sub.add_parser('usb-artifact-host', parents=[common])
+    usb.add_argument('--id', required=True)
+    usb.add_argument('--hostname')
+    usb.add_argument('--platform', default='windows')
+    usb.add_argument('--role', default='workstation')
+    usb.add_argument('--status', default='suspected')
+    usb.add_argument('--attacker-role', default='unknown')
+    usb.add_argument('--friendly-name')
+    usb.add_argument('--container-id')
+    usb.add_argument('--registry-path')
+    usb.add_argument('--notes')
+    usb.set_defaults(func=cmd_usb_artifact_host)
+
+    vpnp = sub.add_parser('vpn-pivot', parents=[common])
+    vpnp.add_argument('--id', required=True)
+    vpnp.add_argument('--target', required=True)
+    vpnp.add_argument('--hop', required=True)
+    vpnp.add_argument('--method', default='vpn')
+    vpnp.add_argument('--credential')
+    vpnp.add_argument('--command')
+    vpnp.add_argument('--status', default='suspected')
+    vpnp.add_argument('--related-host', action='append')
+    vpnp.add_argument('--notes')
+    vpnp.add_argument('--config-path')
+    vpnp.add_argument('--remote-host')
+    vpnp.add_argument('--remote-port')
+    vpnp.set_defaults(func=cmd_vpn_pivot)
+
+    ada = sub.add_parser('ad-account', parents=[common])
+    ada.add_argument('--id', required=True)
+    ada.add_argument('--type', default='domain')
+    ada.add_argument('--domain')
+    ada.add_argument('--username', required=True)
+    ada.add_argument('--privilege', action='append')
+    ada.add_argument('--access-to', action='append')
+    ada.add_argument('--credential', action='append')
+    ada.add_argument('--related-host', action='append')
+    ada.add_argument('--attacker-use')
+    ada.add_argument('--status', default='compromised')
+    ada.set_defaults(func=cmd_ad_account)
+
+    rdp = sub.add_parser('rdp-host', parents=[common])
+    rdp.add_argument('--id', required=True)
+    rdp.add_argument('--host', required=True)
+    rdp.add_argument('--hostname')
+    rdp.add_argument('--ip')
+    rdp.add_argument('--platform', default='windows')
+    rdp.add_argument('--role', default='workstation')
+    rdp.add_argument('--status', default='suspected')
+    rdp.add_argument('--attacker-role', default='unknown')
+    rdp.add_argument('--access-credential')
+    rdp.add_argument('--access-via')
+    rdp.set_defaults(func=cmd_rdp_host)
+
+    brw = sub.add_parser('browser-host', parents=[common])
+    brw.add_argument('--id', required=True)
+    brw.add_argument('--endpoint', required=True)
+    brw.add_argument('--host')
+    brw.add_argument('--hostname')
+    brw.add_argument('--ip')
+    brw.add_argument('--browser')
+    brw.add_argument('--platform', default='unknown')
+    brw.add_argument('--role', default='unknown')
+    brw.add_argument('--status', default='suspected')
+    brw.add_argument('--attacker-role', default='unknown')
+    brw.add_argument('--notes')
+    brw.set_defaults(func=cmd_browser_host)
+
+    cifs = sub.add_parser('cifs-pivot', parents=[common])
+    cifs.add_argument('--id', required=True)
+    cifs.add_argument('--target', required=True)
+    cifs.add_argument('--hop', required=True)
+    cifs.add_argument('--credential')
+    cifs.add_argument('--command')
+    cifs.add_argument('--status', default='suspected')
+    cifs.add_argument('--related-host', action='append')
+    cifs.add_argument('--notes')
+    cifs.add_argument('--config-path')
+    cifs.add_argument('--share-path', required=True)
+    cifs.set_defaults(func=cmd_cifs_pivot)
+
+    piv = sub.add_parser('pivot', parents=[common])
+    piv.add_argument('--id', required=True)
+    piv.add_argument('--target', required=True)
+    piv.add_argument('--hop', required=True)
+    piv.add_argument('--method', required=True)
+    piv.add_argument('--credential')
+    piv.add_argument('--command')
+    piv.add_argument('--tunnel')
+    piv.add_argument('--status', default='suspected')
+    piv.add_argument('--related-host', action='append')
+    piv.add_argument('--notes')
+    piv.add_argument('--evidence-kind')
+    piv.add_argument('--evidence-host')
+    piv.add_argument('--evidence-path')
+    piv.set_defaults(func=cmd_pivot)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()
