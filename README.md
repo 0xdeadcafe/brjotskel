@@ -90,6 +90,8 @@ Build the image:
 docker build -t brjotskel:local .
 ```
 
+Rebuild after changes to `Dockerfile` or base tooling. For day-to-day extension/skill tuning, mounting `.pi/` is usually enough.
+
 Run it:
 
 ```sh
@@ -135,12 +137,16 @@ remote_connect(protocol="ssh", target="root@10.10.10.5", name="web01", password=
 remote_exec(session="web01", command="hostname; id; ss -tunap")
 remote_tunnel(type="dynamic", via="root@10.10.10.5", local_port=1080, description="SOCKS via web01")
 remote_sessions()
+
+# If a Unix SSH target is misdetected, force shell framing explicitly:
+remote_connect(protocol="ssh", target="x0r@172.17.0.1", name="gibson", password="<password>", platform_hint="linux", shell_hint="posix")
 ```
 
 Notes:
 - SSH and WinRM sessions preserve shell state between `remote_exec` calls.
 - For password-based SSH, pass `password=` to `remote_connect(...)` instead of shelling out to `sshpass` manually.
 - If an SSH target is Unix-like but output shows PowerShell markers such as `Write-Host`, reconnect with `platform_hint="linux"` (or `macos`) and `shell_hint="posix"`.
+- `shell_hint` accepts `posix`, `powershell`, or `cmd` when you already know the remote shell type.
 - TCP and telnet sessions are best-effort for line-oriented or legacy services.
 - The `/remote-connect` slash command is preview-oriented; use the `remote_connect(...)` tool for actual connections.
 
