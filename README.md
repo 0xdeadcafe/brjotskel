@@ -8,16 +8,17 @@ It is intended for defenders who need to investigate an active compromise from i
 
 ### Containerized operator tooling
 
-- `ssh` — interactive access, ProxyJump, port forwards
+- `ssh`, `sshpass` — interactive access, password-based SSH, ProxyJump, port forwards
 - `pwsh` — PowerShell and WinRM workflows
 - `nmap`, `ncat`, `nc` — service discovery and relay
 - `proxychains4` — SOCKS-based pivoting
 - Impacket — `psexec.py`, `wmiexec.py`, `smbexec.py`, `secretsdump.py`, `ntlmrelayx.py`
 - NetExec — credential validation and lateral-movement mapping
 - `curl`, `jq`, `git`, `python3`, `neovim` — general support tools
+- `pi-smart-fetch` — smarter `web_fetch` with browser-like TLS fingerprints and Defuddle extraction
 - `ir-log` — local operator audit logger
 
-### pi extensions
+### pi extensions and packages
 
 - `.pi/extensions/remote-session.ts`
   - Persistent named SSH, WinRM, TCP, and telnet sessions
@@ -29,11 +30,19 @@ It is intended for defenders who need to investigate an active compromise from i
   - Query helpers for access mapping
   - Timeline tracking for discoveries and response actions
 
+### bundled pi package
+
+- `pi-smart-fetch`
+  - Adds `web_fetch` and `batch_web_fetch`
+  - Uses browser-like TLS/HTTP fingerprints for better success on defended sites
+  - Supports Defuddle extraction for readable markdown/text output
+
 ### pi skills
 
 - `.pi/skills/gather-playbooks/` — triage playbooks for compromised Linux, Windows, and macOS hosts
 - `.pi/skills/host-ir-playbooks/` — host-centric IR workflows for confirming compromise and understanding attacker activity
 - `.pi/skills/shell-commands/` — native command reference for investigation, containment, persistence checks, and credential recovery
+- `.pi/skills/nmap-playbooks/` — Nmap, NSE, Ncat, Nping, and Ndiff playbooks for scoped discovery and validation
 
 ## Core workflows
 
@@ -87,6 +96,20 @@ Run it:
 docker run --rm -it \
   -v "$PWD/logs:/opt/brjotskel/logs" \
   -v "$PWD/workspace:/workspace" \
+  -v "$PWD/.pi:/opt/brjotskel/.pi" \
+  brjotskel:local
+```
+
+For active extension/skill development, mount `.pi/` from the host so changes are picked up immediately inside the container without rebuilding the image.
+
+Optional while iterating on editor config too:
+
+```sh
+docker run --rm -it \
+  -v "$PWD/logs:/opt/brjotskel/logs" \
+  -v "$PWD/workspace:/workspace" \
+  -v "$PWD/.pi:/opt/brjotskel/.pi" \
+  -v "$PWD/.config/nvim:/etc/xdg/nvim" \
   brjotskel:local
 ```
 
@@ -108,7 +131,7 @@ nmap -sT -Pn 10.10.10.0/24 -p 22,445,3389 --open
 ### Use pi remote sessions
 
 ```text
-remote_connect(protocol="ssh", target="root@10.10.10.5", name="web01")
+remote_connect(protocol="ssh", target="root@10.10.10.5", name="web01", password="<password>")
 remote_exec(session="web01", command="hostname; id; ss -tunap")
 remote_tunnel(type="dynamic", via="root@10.10.10.5", local_port=1080, description="SOCKS via web01")
 remote_sessions()
@@ -116,6 +139,8 @@ remote_sessions()
 
 Notes:
 - SSH and WinRM sessions preserve shell state between `remote_exec` calls.
+- For password-based SSH, pass `password=` to `remote_connect(...)` instead of shelling out to `sshpass` manually.
+- If an SSH target is Unix-like but output shows PowerShell markers such as `Write-Host`, reconnect with `platform_hint="linux"` (or `macos`) and `shell_hint="posix"`.
 - TCP and telnet sessions are best-effort for line-oriented or legacy services.
 - The `/remote-connect` slash command is preview-oriented; use the `remote_connect(...)` tool for actual connections.
 
@@ -138,6 +163,7 @@ intel_summary()
 - Track discovered scope in `workspace/`, such as `workspace/scope.yaml` and `workspace/pivot-chain.md`.
 - The intel store defaults to `./intel/` under the working directory, or `BRJOTSKEL_INTEL_DIR` if set.
 - Remote session logs default to `$BRJOTSKEL_LOG_DIR/remote-sessions/`; otherwise they are written under `./logs/remote-sessions/` in the working directory.
+- During active development, mount host `.pi/` to `/opt/brjotskel/.pi` so extension and skill edits persist and do not require an image rebuild.
 - `ir-log` writes daily audit files to `$BRJOTSKEL_LOG_DIR` when set.
 
 ## Platform support snapshot

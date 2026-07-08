@@ -58,7 +58,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -80,7 +80,10 @@ interface SessionInfo {
   commandCount: number;
   lastCommandAt: Date | null;
   platform: "windows" | "linux" | "macos" | "network-device" | "unknown";
+  shellFamily: "posix" | "powershell" | "cmd" | "unknown";
 }
+
+type ShellFamily = SessionInfo["shellFamily"];
 
 interface RemoteSession {
   info: SessionInfo;
@@ -119,8 +122,6 @@ interface TunnelInfo {
 // -------------------------------------------------------------------
 const MARKER_PREFIX = "__PI_CMD_DONE_";
 const MARKER_SUFFIX = "__";
-const SSH_READY_PREFIX = "__PI_SSH_READY_";
-const SSH_READY_SUFFIX = "__";
 
 function generateMarker(): string {
   return `${MARKER_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 8)}${MARKER_SUFFIX}`;
@@ -253,7 +254,44 @@ function getSession(name?: string): RemoteSession {
 // SSH Connection
 // -------------------------------------------------------------------
 
-function connectSSH(name: string, target: string, options: { port?: number; identity?: string; proxyJump?: string } = {}): Promise<RemoteSession> {
+function detectSshShell(buffer: string, platformHint?: SessionInfo["platform"], shellHint?: ShellFamily): Pick<SessionInfo, "platform" | "shellFamily"> | null {
+  const text = buffer.replace(/\r/g, "");
+  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
+
+  if (shellHint === "posix") {
+    if (lines.length > 0) return { platform: platformHint === "macos" ? "macos" : (platformHint === "linux" ? "linux" : "linux"), shellFamily: "posix" };
+  }
+  if (shellHint === "powershell") {
+    if (lines.length > 0) return { platform: "windows", shellFamily: "powershell" };
+  }
+  if (shellHint === "cmd") {
+    if (lines.length > 0) return { platform: "windows", shellFamily: "cmd" };
+  }
+
+  for (const line of lines) {
+    if (/^PS\s+.*>\s*$/.test(line)) return { platform: "windows", shellFamily: "powershell" };
+    if (/^[A-Za-z]:\\.*>\s*$/.test(line)) return { platform: "windows", shellFamily: "cmd" };
+    if (/^[^\s@]+@[^\s:]+:.*[$#]\s*$/.test(line)) return { platform: "linux", shellFamily: "posix" };
+    if (/^.*\s[#$>]\s*$/.test(line) && platformHint === "network-device") {
+      return { platform: "network-device", shellFamily: "unknown" };
+    }
+  }
+
+  if (platformHint === "linux" || platformHint === "macos") {
+    if (lines.some(line => /[$#]\s*$/.test(line) || /^(Linux|Darwin)$/i.test(line))) {
+      return { platform: platformHint, shellFamily: "posix" };
+    }
+  }
+
+  if (platformHint === "windows") {
+    if (lines.some(line => /^PS\s+.*>\s*$/.test(line))) return { platform: "windows", shellFamily: "powershell" };
+    if (lines.some(line => /^[A-Za-z]:\\.*>\s*$/.test(line))) return { platform: "windows", shellFamily: "cmd" };
+  }
+
+  return null;
+}
+
+function connectSSH(name: string, target: string, options: { port?: number; identity?: string; proxyJump?: string; password?: string; platformHint?: SessionInfo["platform"]; shellHint?: ShellFamily } = {}): Promise<RemoteSession> {
   return new Promise((resolve, reject) => {
     const args = [
       "-tt",
@@ -261,16 +299,28 @@ function connectSSH(name: string, target: string, options: { port?: number; iden
       "-o", "ServerAliveInterval=30",
       "-o", "ServerAliveCountMax=3",
       "-o", "LogLevel=ERROR",
+      "-o", "PreferredAuthentications=publickey,password,keyboard-interactive",
     ];
     if (options.port) args.push("-p", String(options.port));
     if (options.identity) args.push("-i", options.identity);
     if (options.proxyJump) args.push("-J", options.proxyJump);
     args.push(target);
 
-    const proc = spawn("ssh", args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, TERM: "dumb" },
-    });
+    const sshpassPath = existsSync("/usr/bin/sshpass") ? "/usr/bin/sshpass" : (existsSync("/bin/sshpass") ? "/bin/sshpass" : null);
+    if (options.password && !sshpassPath) {
+      reject(new Error("SSH password authentication requested, but sshpass is not installed in the container. Install sshpass or use key-based auth / remote_connect(password=...)."));
+      return;
+    }
+
+    const proc = options.password
+      ? spawn(sshpassPath!, ["-e", "ssh", ...args], {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, TERM: "dumb", SSHPASS: options.password },
+        })
+      : spawn("ssh", args, {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, TERM: "dumb" },
+        });
 
     const session: RemoteSession = {
       info: {
@@ -280,7 +330,8 @@ function connectSSH(name: string, target: string, options: { port?: number; iden
         connectedAt: new Date(),
         commandCount: 0,
         lastCommandAt: null,
-        platform: "unknown",
+        platform: options.platformHint || "unknown",
+        shellFamily: options.shellHint || (options.platformHint === "linux" || options.platformHint === "macos" ? "posix" : "unknown"),
       },
       process: proc,
       buffer: "",
@@ -289,46 +340,24 @@ function connectSSH(name: string, target: string, options: { port?: number; iden
       execChain: Promise.resolve(),
     };
 
-    const readyMarker = `${SSH_READY_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 8)}${SSH_READY_SUFFIX}`;
-    const readyCommand = `echo '${readyMarker}'\nuname -s 2>/dev/null || echo WINDOWS\necho '${readyMarker}'`;
-    let handshakeSent = false;
-
     let connectTimeout = setTimeout(() => {
       proc.kill();
       reject(new Error(`SSH connection to ${target} timed out (30s)`));
     }, 30_000);
 
-    const tryHandshake = () => {
-      if (handshakeSent || !proc.stdin || proc.killed) return;
-      handshakeSent = true;
-      proc.stdin.write(readyCommand + "\n");
-    };
-    setTimeout(tryHandshake, 250);
-
     proc.stdout!.on("data", (data: Buffer) => {
       const text = data.toString();
       session.buffer += text;
 
-      // Initial connection detection via explicit handshake
       if (!session.ready) {
-        const first = session.buffer.indexOf(readyMarker);
-        if (first !== -1) {
-          const second = session.buffer.indexOf(readyMarker, first + readyMarker.length);
-          if (second !== -1) {
-            const between = session.buffer.slice(first + readyMarker.length, second).toLowerCase();
-            if (between.includes("linux")) {
-              session.info.platform = "linux";
-            } else if (between.includes("darwin")) {
-              session.info.platform = "macos";
-            } else if (between.includes("windows")) {
-              session.info.platform = "windows";
-            }
-            session.buffer = session.buffer.slice(second + readyMarker.length);
-            session.ready = true;
-            clearTimeout(connectTimeout);
-            resolve(session);
-            return;
-          }
+        const detected = detectSshShell(session.buffer, options.platformHint, options.shellHint);
+        if (detected) {
+          session.info.platform = detected.platform;
+          session.info.shellFamily = detected.shellFamily;
+          session.ready = true;
+          clearTimeout(connectTimeout);
+          resolve(session);
+          return;
         }
       }
 
@@ -402,6 +431,7 @@ function connectWinRM(name: string, target: string, options: { user?: string; pa
         commandCount: 0,
         lastCommandAt: null,
         platform: "windows",
+        shellFamily: "powershell",
       },
       process: proc,
       buffer: "",
@@ -485,6 +515,7 @@ function connectTCP(name: string, host: string, port: number): Promise<RemoteSes
         commandCount: 0,
         lastCommandAt: null,
         platform: "unknown",
+        shellFamily: "unknown",
       },
       process: proc,
       buffer: "",
@@ -505,6 +536,7 @@ function connectTCP(name: string, host: string, port: number): Promise<RemoteSes
         clearTimeout(connectTimeout);
         if (session.buffer.match(/[#>]\s*$/)) {
           session.info.platform = "network-device";
+          session.info.shellFamily = "unknown";
         }
         resolve(session);
       }
@@ -538,6 +570,7 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
         commandCount: 0,
         lastCommandAt: null,
         platform: "unknown",
+        shellFamily: "unknown",
       },
       process: proc,
       buffer: "",
@@ -560,6 +593,7 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
         clearTimeout(connectTimeout);
         if (session.buffer.match(/[#>:]\s*$/)) {
           session.info.platform = "network-device";
+          session.info.shellFamily = "unknown";
         }
         resolve(session);
       }
@@ -581,6 +615,47 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
 // -------------------------------------------------------------------
 // Command Execution
 // -------------------------------------------------------------------
+
+function cleanCommandOutput(session: RemoteSession, command: string, output: string): string {
+  let text = output.replace(/\r/g, "").trim();
+  if (!text) return text;
+
+  const lines = text.split("\n");
+  const trimmedCommand = command.trim();
+
+  while (lines.length > 0) {
+    const first = lines[0].trim();
+    if (!first) {
+      lines.shift();
+      continue;
+    }
+    if (first === trimmedCommand) {
+      lines.shift();
+      continue;
+    }
+    if (trimmedCommand && first.endsWith(trimmedCommand)) {
+      lines.shift();
+      continue;
+    }
+    break;
+  }
+
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1].trim();
+    if (!last) {
+      lines.pop();
+      continue;
+    }
+    if (/^PS\s+.*>\s*$/.test(last) || /^[A-Za-z]:\\.*>\s*$/.test(last) || /^[^\s@]+@[^\s:]+:.*[$#]\s*$/.test(last)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+
+  text = lines.join("\n").trim();
+  return text;
+}
 
 function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<string> {
   session.execChain = session.execChain.catch(() => undefined).then(() => new Promise<string>((resolve, reject) => {
@@ -639,16 +714,19 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       command,
       marker,
       resolve: (output) => {
-        logToSession(session.info.name, "<<<", output);
-        resolve(output);
+        const cleaned = cleanCommandOutput(session, command, output);
+        logToSession(session.info.name, "<<<", cleaned);
+        resolve(cleaned);
       },
       reject,
       timeout,
     });
 
-    const markerCmd = session.info.platform === "windows"
+    const markerCmd = session.info.shellFamily === "powershell"
       ? `${command}\nWrite-Host '${psSingleQuote(marker)}'`
-      : `${command}\necho '${shellSingleQuote(marker)}'`;
+      : session.info.shellFamily === "cmd"
+        ? `${command}\r\necho ${marker}`
+        : `${command}\necho '${shellSingleQuote(marker)}'`;
 
     session.process.stdin!.write(markerCmd + "\n");
   }));
@@ -674,6 +752,8 @@ export default function (pi: ExtensionAPI) {
       "Use remote_connect to establish a persistent named session before running remote_exec commands.",
       "Give each session a meaningful name (e.g., 'web01', 'dc01', 'pivot-box') for clarity.",
       "Use remote_disconnect when investigation of a host is complete.",
+      "For password-based SSH, pass the password directly to remote_connect rather than shelling out to sshpass manually.",
+      "If SSH auto-detection is unreliable, set platform_hint (e.g., linux) and/or shell_hint (e.g., posix) so remote_exec uses the correct shell markers.",
       "For pivoting: use proxy_jump parameter or remote_tunnel + connect to localhost.",
       "Multiple sessions can be active simultaneously for cross-host investigation.",
     ],
@@ -685,7 +765,9 @@ export default function (pi: ExtensionAPI) {
       identity: Type.Optional(Type.String({ description: "SSH identity file path (e.g., recovered key from compromised host)" })),
       proxy_jump: Type.Optional(Type.String({ description: "SSH ProxyJump host for multi-hop (e.g., 'user@jumpbox' or 'user@hop1,user@hop2')" })),
       user: Type.Optional(Type.String({ description: "Username for WinRM" })),
-      password: Type.Optional(Type.String({ description: "Password for WinRM" })),
+      password: Type.Optional(Type.String({ description: "Password for SSH or WinRM. For SSH, remote_connect uses sshpass when available." })),
+      platform_hint: Type.Optional(Type.String({ description: "Override/assist platform detection when the remote shell is known or auto-detection is unreliable (e.g., linux, windows, macos, network-device)" })),
+      shell_hint: Type.Optional(Type.String({ description: "Override shell framing when known (posix, powershell, cmd). Useful when auto-detection is unreliable." })),
       set_default: Type.Optional(Type.Boolean({ description: "Set this as the default session for remote_exec (default: true if first session)" })),
     }),
 
@@ -718,6 +800,9 @@ export default function (pi: ExtensionAPI) {
               port: params.port,
               identity: params.identity,
               proxyJump: params.proxy_jump,
+              password: params.password,
+              platformHint: params.platform_hint as SessionInfo["platform"] | undefined,
+              shellHint: params.shell_hint as ShellFamily | undefined,
             });
             break;
           case "winrm":

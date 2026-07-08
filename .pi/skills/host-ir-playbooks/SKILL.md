@@ -28,6 +28,13 @@ Host-specific incident response playbooks for answering:
 3. **Native commands only** — no binary uploads to the target.
 4. **Read-only by default** — do not change host state unless the user explicitly asks for containment/eradication steps.
 5. **Explain significance** — findings should help distinguish suspicious from routine administration.
+6. **Use persistent remote sessions first** — prefer `remote_connect` / `remote_exec` over ad hoc `ssh ...` or manual `sshpass` one-liners so shell state, prompts, and logging stay consistent.
+
+## Remote session notes
+
+- For password-based SSH, pass the password to `remote_connect(...)` instead of spawning `sshpass` manually.
+- If an SSH-connected Unix host shows PowerShell artifacts like `Write-Host` in output, treat that as shell/platform misdetection and reconnect with `platform_hint="linux"` (or `macos` as appropriate) plus `shell_hint="posix"`.
+- For first-pass host IR, prefer one persistent session and run grouped commands through `remote_exec` rather than opening a new SSH connection per command.
 
 ## Use when
 
@@ -110,12 +117,13 @@ This skill currently ships as a **starter set**: a few focused host-IR playbooks
 ## Expected workflow
 
 1. Identify platform and host role
-2. Collect volatile live-state artifacts first
-3. Hunt persistence and recent execution artifacts
-4. Review credential and lateral movement clues
-5. Record findings with `intel_add`
-6. Add major conclusions to the timeline
-7. Recommend next host-specific actions
+2. Establish a persistent remote session with the correct shell/platform hint if needed
+3. Collect volatile live-state artifacts first
+4. Hunt persistence and recent execution artifacts
+5. Review credential and lateral movement clues
+6. Record findings with `intel_add`
+7. Add major conclusions to the timeline
+8. Recommend next host-specific actions
 
 ### Recommended Windows first-pass order
 

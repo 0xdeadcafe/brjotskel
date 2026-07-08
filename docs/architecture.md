@@ -41,6 +41,8 @@ The `remote-session` extension (`.pi/extensions/remote-session.ts`) provides per
 
 Logs are local plain-text append-only operational records. For production, mount `logs/` to durable storage and ship it to your central logging system. Every credential harvest, pivot, and eradication action is recorded.
 
+During extension/skill development, also mount host `.pi/` to `/opt/brjotskel/.pi` so changes to local pi extensions and skills are immediately visible in the container without rebuilding the image.
+
 ## Operational Workflows
 
 ### 1. Reconnaissance & Scoping

@@ -10,12 +10,14 @@ RUN apt-get update \
         gnupg \
         apt-transport-https \
         openssh-client \
+        sshpass \
         ncat \
         nmap \
         proxychains4 \
         jq \
         git \
         ripgrep \
+        fd-find \
         python3 \
         python3-pip \
         python3-yaml \
@@ -40,7 +42,7 @@ RUN pip3 install --no-cache-dir --break-system-packages impacket \
     || echo 'NetExec install skipped — install manually if needed'
 
 # --- Node.js (for pi agent / extensions) ---
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -62,7 +64,9 @@ COPY docs/ /opt/brjotskel/docs/
 COPY .pi/ /opt/brjotskel/.pi/
 COPY .config/nvim/ /etc/xdg/nvim/
 
-RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /workspace
+RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /workspace \
+    && cd /opt/brjotskel \
+    && pi install -l --approve npm:pi-smart-fetch
 
 ENV BRJOTSKEL_LOG_DIR=/opt/brjotskel/logs
 
