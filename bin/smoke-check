@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "[1/5] bash syntax"
+bash -n bin/ir-log
+
+echo "[2/5] python syntax"
+python3 -m py_compile bin/intel-snippet
+
+echo "[3/5] extension syntax"
+node --check .pi/extensions/intel-store.ts >/dev/null
+node --check .pi/extensions/remote-session.ts >/dev/null
+
+echo "[4/5] removed auth-context references"
+if rg -n "BRJOTSKEL_AUTH_CONTEXT|ensureAuthContext" .pi/extensions/remote-session.ts >/dev/null; then
+  echo "Found deprecated auth-context reference(s)"
+  exit 1
+fi
+
+echo "[5/5] done"
+echo "smoke-check: OK"

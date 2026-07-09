@@ -62,7 +62,6 @@ See [CONSTITUTION.md](CONSTITUTION.md).
 
 Key rules:
 
-- Require an authorization context via `BRJOTSKEL_AUTH_CONTEXT`
 - Stay within the authorized incident scope
 - Prefer evidence collection before destructive action
 - Log operator activity locally
@@ -83,6 +82,13 @@ README.md               project overview
 ```
 
 ## Quick start
+
+Smoke check after local changes:
+
+```sh
+bash bin/smoke-check
+```
+
 
 Build the image:
 
@@ -115,11 +121,6 @@ docker run --rm -it \
   brjotskel:local
 ```
 
-Set the required authorization context before operating:
-
-```sh
-export BRJOTSKEL_AUTH_CONTEXT="INC-2026-0042 active compromise - authorized threat pursuit"
-```
 
 ## Example usage
 
@@ -170,7 +171,7 @@ intel_summary()
 - The intel store defaults to `./intel/` under the working directory, or `BRJOTSKEL_INTEL_DIR` if set.
 - Remote session logs default to `$BRJOTSKEL_LOG_DIR/remote-sessions/`; otherwise they are written under `./logs/remote-sessions/` in the working directory.
 - During active development, mount host `.pi/` to `/opt/brjotskel/.pi` so extension and skill edits persist and do not require an image rebuild.
-- `ir-log` writes daily audit files to `$BRJOTSKEL_LOG_DIR` when set.
+- `ir-log` writes daily audit files to `$BRJOTSKEL_LOG_DIR` when set and tags entries with the local hostname.
 
 ## Platform support snapshot
 
