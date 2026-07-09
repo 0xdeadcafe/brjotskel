@@ -49,7 +49,6 @@
  *   - Sessions are persistent (kept-alive with marker-based output detection)
  *   - All commands are audit-logged
  *   - Output is truncated per pi conventions (50KB / 2000 lines)
- *   - Requires BRJOTSKEL_AUTH_CONTEXT for all operations
  *
  * Container Dependencies:
  *   - openssh-client (ssh) — included in Docker image
@@ -208,10 +207,8 @@ function processTelnetChunk(session: RemoteSession, data: Buffer): string {
   return Buffer.from(out).toString();
 }
 
-function ensureAuthContext(): void {
-  if (!process.env.BRJOTSKEL_AUTH_CONTEXT) {
-    throw new Error("BRJOTSKEL_AUTH_CONTEXT is required. Set it to your incident/ticket ID before operating.");
-  }
+function getLocalHostname(): string {
+  return process.env.HOSTNAME || process.env.COMPUTERNAME || "unknown-host";
 }
 
 function getLogPath(sessionName: string): string {
@@ -223,8 +220,8 @@ function getLogPath(sessionName: string): string {
 function logToSession(sessionName: string, direction: ">>>" | "<<<" | "---", content: string): void {
   const logPath = getLogPath(sessionName);
   const ts = new Date().toISOString();
-  const auth = process.env.BRJOTSKEL_AUTH_CONTEXT || "UNSET";
-  const line = `[${ts}] auth=${auth} ${direction} ${content}\n`;
+  const host = getLocalHostname();
+  const line = `[${ts}] host=${host} ${direction} ${content}\n`;
   try { appendFileSync(logPath, line); } catch { /* ignore */ }
 }
 
@@ -772,8 +769,6 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      ensureAuthContext();
-
       if (sessions.has(params.name)) {
         throw new Error(`Session '${params.name}' already exists. Disconnect it first or use a different name.`);
       }
@@ -782,14 +777,14 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) {
         const confirmed = await ctx.ui.confirm(
           "Remote Connection",
-          `Connect to ${params.target} via ${params.protocol.toUpperCase()} as session '${params.name}'?\n\nAuth context: ${process.env.BRJOTSKEL_AUTH_CONTEXT}`,
+          `Connect to ${params.target} via ${params.protocol.toUpperCase()} as session '${params.name}'?`,
         );
         if (!confirmed) {
           throw new Error("Connection cancelled by operator");
         }
       }
 
-      logToSession(params.name, "---", `[SESSION START] ${params.protocol}://${params.target} auth=${process.env.BRJOTSKEL_AUTH_CONTEXT}`);
+      logToSession(params.name, "---", `[SESSION START] ${params.protocol}://${params.target}`);
 
       try {
         let session: RemoteSession;
@@ -874,8 +869,6 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      ensureAuthContext();
-
       const session = getSession(params.session);
 
       if (!session.process || session.process.killed) {
@@ -928,8 +921,6 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      ensureAuthContext();
-
       const session = getSession(params.session);
 
       if (!session.process || session.process.killed) {
@@ -1112,18 +1103,20 @@ export default function (pi: ExtensionAPI) {
       type: StringEnum(["local", "remote", "dynamic"] as const),
       via: Type.String({ description: "SSH hop: user@host (the compromised system to tunnel through)" }),
       local_port: Type.Number({ description: "Local port to bind (e.g., 2222, 1080 for SOCKS)" }),
-      remote_host: Type.Optional(Type.String({ description: "Target host reachable from the hop (for local/remote forwards)" })),
-      remote_port: Type.Optional(Type.Number({ description: "Target port on remote_host (for local/remote forwards)" })),
+      remote_host: Type.Optional(Type.String({ description: "Target host reachable from the hop (required for local forwards; ignored for remote forwards)" })),
+      remote_port: Type.Optional(Type.Number({ description: "Target port on remote_host for local forwards, or listening port on the remote SSH host for remote forwards" })),
       ssh_port: Type.Optional(Type.Number({ description: "SSH port on the hop host (default: 22)" })),
       identity: Type.Optional(Type.String({ description: "SSH identity file for the hop" })),
       description: Type.Optional(Type.String({ description: "Human description (e.g., 'SOCKS through web01 to DB segment')" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      ensureAuthContext();
+      if (params.type === "local" && (!params.remote_host || !params.remote_port)) {
+        throw new Error("remote_host and remote_port are required for local forwards.");
+      }
 
-      if (params.type !== "dynamic" && (!params.remote_host || !params.remote_port)) {
-        throw new Error("remote_host and remote_port are required for local/remote forwards. Only dynamic (SOCKS) can omit them.");
+      if (params.type === "remote" && !params.remote_port) {
+        throw new Error("remote_port is required for remote forwards.");
       }
 
       if (ctx.hasUI) {
@@ -1138,7 +1131,7 @@ export default function (pi: ExtensionAPI) {
 
         const confirmed = await ctx.ui.confirm(
           "Create SSH Tunnel",
-          `${desc}\n\nAuth: ${process.env.BRJOTSKEL_AUTH_CONTEXT}`,
+          desc,
         );
         if (!confirmed) {
           throw new Error("Tunnel creation cancelled by operator");
@@ -1179,15 +1172,38 @@ export default function (pi: ExtensionAPI) {
       });
 
       const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        let settled = false;
         let stderr = "";
-        proc.stderr!.on("data", (data: Buffer) => { stderr += data.toString(); });
-        proc.on("close", (code) => {
-          if (code !== 0) resolve({ success: false, error: stderr.trim() || `SSH exited with code ${code}` });
+        const fatalPattern = /(permission denied|connection refused|no route to host|connection timed out|could not resolve hostname|network is unreachable|administratively prohibited|address already in use|bad local forwarding specification|bad remote forwarding specification|channel_setup_fwd_listener: cannot listen)/i;
+
+        const finish = (value: { success: boolean; error?: string }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(successTimer);
+          resolve(value);
+        };
+
+        proc.stderr!.on("data", (data: Buffer) => {
+          stderr += data.toString();
+          if (fatalPattern.test(stderr)) {
+            finish({ success: false, error: stderr.trim() });
+          }
         });
-        proc.on("error", (err) => resolve({ success: false, error: err.message }));
-        setTimeout(() => {
-          if (!proc.killed && proc.exitCode === null) resolve({ success: true });
-        }, 3000);
+
+        proc.on("close", (code) => {
+          if (settled) return;
+          finish({ success: false, error: stderr.trim() || `SSH exited with code ${code}` });
+        });
+
+        proc.on("error", (err) => finish({ success: false, error: err.message }));
+
+        const successTimer = setTimeout(() => {
+          if (!proc.killed && proc.exitCode === null) {
+            finish({ success: true });
+          } else {
+            finish({ success: false, error: stderr.trim() || `SSH exited with code ${proc.exitCode}` });
+          }
+        }, 5000);
       });
 
       if (!result.success) {
@@ -1198,7 +1214,9 @@ export default function (pi: ExtensionAPI) {
       const tunnelId = `tun-${tunnelCounter}`;
       const description = params.description || (params.type === "dynamic"
         ? `SOCKS proxy via ${params.via}`
-        : `${params.type} forward ${params.local_port}→${params.remote_host}:${params.remote_port} via ${params.via}`);
+        : params.type === "local"
+          ? `local forward ${params.local_port}→${params.remote_host}:${params.remote_port} via ${params.via}`
+          : `remote forward ${params.remote_port}→localhost:${params.local_port} via ${params.via}`);
 
       const tunnel: TunnelInfo = {
         id: tunnelId,
@@ -1215,6 +1233,21 @@ export default function (pi: ExtensionAPI) {
       activeTunnels.push(tunnel);
       logToSession("_tunnels", "---", `[TUNNEL CREATED] ${tunnelId}: -${forwardSpec!} ${params.via}`);
 
+      proc.on("close", (code) => {
+        const idx = activeTunnels.findIndex(t => t.id === tunnelId);
+        if (idx !== -1) {
+          activeTunnels.splice(idx, 1);
+          logToSession("_tunnels", "---", `[TUNNEL CLOSED] ${tunnelId} exit=${code ?? "unknown"}`);
+          if (ctx.hasUI) {
+            if (activeTunnels.length === 0) {
+              ctx.ui.setStatus("tunnels", undefined);
+            } else {
+              ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
+            }
+          }
+        }
+      });
+
       if (ctx.hasUI) {
         ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
       }
@@ -1225,7 +1258,7 @@ export default function (pi: ExtensionAPI) {
       } else if (params.type === "dynamic") {
         usageHint = `SOCKS5 proxy at: localhost:${params.local_port}\nUsage: proxychains nmap -sT -Pn <targets> or proxychains crackmapexec smb <targets>`;
       } else {
-        usageHint = `Remote host ${params.via} can reach localhost:${params.local_port} on port ${params.remote_port}`;
+        usageHint = `Remote forward active: connections to ${params.via}:${params.remote_port} are forwarded to localhost:${params.local_port} on the harness.`;
       }
 
       return {
