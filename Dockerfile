@@ -26,6 +26,7 @@ RUN apt-get update \
         iputils-ping \
         dnsutils \
         netcat-openbsd \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg \
     && chmod go+r /etc/apt/keyrings/microsoft.gpg \
