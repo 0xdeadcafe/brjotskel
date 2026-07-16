@@ -1,3 +1,8 @@
+# host-ir/windows/powershell-reconstruction.ps1 — Reconstruct PowerShell activity from event logs
+# Requires: Admin for full log access
+# Read-only: YES
+# MITRE ATT&CK: T1059.001
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

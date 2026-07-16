@@ -3,7 +3,12 @@
 # Read-only: YES
 # MITRE ATT&CK: T1087.002 — Domain Account Discovery
 
-Write-Output "=== DOMAIN INFO ==="
+$ErrorActionPreference = 'SilentlyContinue'
+
+function Sec($n) { Write-Output "`n=== $n ===" }
+function Run($c) { Write-Output "PS> $c"; Invoke-Expression $c }
+
+Sec 'DOMAIN_INFO'
 try {
     $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
     Write-Output "Domain: $($domain.Name)"
@@ -15,18 +20,13 @@ try {
     Write-Output "[*] Computer domain: $env:USERDNSDOMAIN"
 }
 
-Write-Output ""
-Write-Output "=== TRUSTS ==="
-try {
-    nltest /domain_trusts 2>$null
-} catch {}
+Sec 'TRUSTS'
+Run 'nltest /domain_trusts'
 
-Write-Output ""
-Write-Output "=== DOMAIN CONTROLLERS ==="
-nltest /dclist:$env:USERDNSDOMAIN 2>$null
+Sec 'DOMAIN_CONTROLLERS'
+Run 'nltest /dclist:$env:USERDNSDOMAIN'
 
-Write-Output ""
-Write-Output "=== PRIVILEGED GROUPS ==="
+Sec 'PRIVILEGED_GROUPS'
 $groups = @("Domain Admins", "Enterprise Admins", "Schema Admins", "Account Operators",
     "Backup Operators", "DnsAdmins", "Server Operators")
 foreach ($g in $groups) {
@@ -34,16 +34,13 @@ foreach ($g in $groups) {
     if ($members) { Write-Output "--- $g ---"; Write-Output $members }
 }
 
-Write-Output ""
-Write-Output "=== CURRENT USER DOMAIN GROUPS ==="
-whoami /groups 2>$null | Select-String "Domain\|BUILTIN\|Mandatory"
+Sec 'CURRENT_USER_DOMAIN_GROUPS'
+Run 'whoami /groups | Select-String "Domain\\|BUILTIN\\|Mandatory"'
 
-Write-Output ""
-Write-Output "=== KERBEROS TICKETS ==="
-klist 2>$null
+Sec 'KERBEROS_TICKETS'
+Run 'klist'
 
-Write-Output ""
-Write-Output "=== SPNs (Kerberoastable) ==="
+Sec 'SPNS_KERBEROASTABLE'
 $searcher = New-Object DirectoryServices.DirectorySearcher -ErrorAction SilentlyContinue
 if ($searcher) {
     $searcher.Filter = "(&(objectCategory=user)(servicePrincipalName=*))"
@@ -58,8 +55,7 @@ if ($searcher) {
     } catch {}
 }
 
-Write-Output ""
-Write-Output "=== ASREP-ROASTABLE (no preauth) ==="
+Sec 'ASREP_ROASTABLE'
 if ($searcher) {
     $searcher.Filter = "(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))"
     $searcher.PropertiesToLoad.Clear()
@@ -70,27 +66,16 @@ if ($searcher) {
     } catch {}
 }
 
-Write-Output ""
-Write-Output "=== DOMAIN PASSWORD POLICY ==="
-net accounts /domain 2>$null
+Sec 'DOMAIN_PASSWORD_POLICY'
+Run 'net accounts /domain'
 
-Write-Output ""
-Write-Output "=== RECENT DOMAIN LOGONS (this machine) ==="
-Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624; StartTime=(Get-Date).AddDays(-3)} -MaxEvents 20 -ErrorAction SilentlyContinue |
-    Where-Object { $_.Properties[8].Value -in @(2,3,10) } |
-    ForEach-Object {
-        $logonType = $_.Properties[8].Value
-        $user = "$($_.Properties[6].Value)\$($_.Properties[5].Value)"
-        $src = $_.Properties[18].Value
-        Write-Output "  $($_.TimeCreated) | Type:$logonType | $user | From:$src"
-    }
+Sec 'RECENT_DOMAIN_LOGONS'
+Run 'Get-WinEvent -FilterHashtable @{LogName="Security"; ID=4624; StartTime=(Get-Date).AddDays(-3)} -MaxEvents 20 | Where-Object { $_.Properties[8].Value -in @(2,3,10) } | ForEach-Object { $logonType = $_.Properties[8].Value; $user = "{0}\{1}" -f $_.Properties[6].Value, $_.Properties[5].Value; $src = $_.Properties[18].Value; Write-Output "  $($_.TimeCreated) | Type:$logonType | $user | From:$src" }'
 
-Write-Output ""
-Write-Output "=== GPO LIST ==="
-gpresult /r 2>$null | Select-String "Applied Group Policy|Filtering" | Select-Object -First 20
+Sec 'GPO_LIST'
+Run 'gpresult /r | Select-String "Applied Group Policy|Filtering" | Select-Object -First 20'
 
-Write-Output ""
-Write-Output "=== LAPS ==="
+Sec 'LAPS'
 try {
     $root = [ADSI]"LDAP://RootDSE"
     $base = "LDAP://" + $root.defaultNamingContext

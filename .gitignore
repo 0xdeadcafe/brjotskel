@@ -4,6 +4,22 @@ workspace/**
 !workspace/.gitkeep
 config/targets.yaml
 .env
+.env.*
 temp/
 *.log
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Node
+node_modules/
+.npm/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp

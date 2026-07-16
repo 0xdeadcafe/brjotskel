@@ -1,3 +1,8 @@
+# host-ir/windows/eventlog-hunt.ps1 — Deep Windows event-log investigation
+# Requires: Admin for full Security/Sysmon access
+# Read-only: YES
+# MITRE ATT&CK: T1078 / T1059.001 / T1543.003 / T1053 / T1021 / T1562
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

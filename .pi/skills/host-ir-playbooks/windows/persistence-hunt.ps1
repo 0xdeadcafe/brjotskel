@@ -1,3 +1,8 @@
+# host-ir/windows/persistence-hunt.ps1 — Hunt persistence mechanisms on a Windows host
+# Requires: Admin for full coverage
+# Read-only: YES
+# MITRE ATT&CK: T1547 / T1053 / T1543 / T1546
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }
@@ -30,10 +35,10 @@ Run 'Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Start
 Run 'Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Force'
 
 Sec 'WMI_PERSISTENCE'
-Run 'Get-WmiObject -Namespace root\subscription -Class __EventFilter'
-Run 'Get-WmiObject -Namespace root\subscription -Class CommandLineEventConsumer'
-Run 'Get-WmiObject -Namespace root\subscription -Class ActiveScriptEventConsumer'
-Run 'Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding'
+Run 'Get-CimInstance -Namespace root/subscription -ClassName __EventFilter'
+Run 'Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer'
+Run 'Get-CimInstance -Namespace root/subscription -ClassName ActiveScriptEventConsumer'
+Run 'Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding'
 
 Sec 'LOGON_AND_REMOTE_ACCESS'
 Run 'query user'

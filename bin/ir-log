@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# ir-log — Append an audit entry. Requires BRJOTSKEL_AUTH_CONTEXT.
+# ir-log — Append an audit entry tagged with local execution context.
 set -euo pipefail
-
-if [[ -z "${BRJOTSKEL_AUTH_CONTEXT:-}" ]]; then
-  echo "BRJOTSKEL_AUTH_CONTEXT is required" >&2
-  exit 1
-fi
 
 log_dir="${BRJOTSKEL_LOG_DIR:-logs}"
 mkdir -p "$log_dir"
 log_file="$log_dir/audit-$(date -u +%Y%m%d).log"
+host_name="$(hostname 2>/dev/null || uname -n 2>/dev/null || printf 'unknown-host')"
+operator_name="${USER:-$(id -un 2>/dev/null || printf 'unknown-user')}"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-printf '%s auth=%q event=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BRJOTSKEL_AUTH_CONTEXT" "$*" >> "$log_file"
+if [[ -n "${BRJOTSKEL_AUTH_CONTEXT:-}" ]]; then
+  printf '%s auth=%q operator=%q host=%q event=%q\n' "$ts" "$BRJOTSKEL_AUTH_CONTEXT" "$operator_name" "$host_name" "$*" >> "$log_file"
+else
+  printf '%s operator=%q host=%q event=%q\n' "$ts" "$operator_name" "$host_name" "$*" >> "$log_file"
+fi

@@ -1,3 +1,8 @@
+# host-ir/windows/sysmon-hunt.ps1 — Sysmon-focused host hunt
+# Requires: Admin (Sysmon log access)
+# Read-only: YES
+# MITRE ATT&CK: T1055 / T1059 / T1071 / T1547 / T1546
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

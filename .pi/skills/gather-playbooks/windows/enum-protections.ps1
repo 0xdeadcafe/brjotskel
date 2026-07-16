@@ -3,12 +3,15 @@
 # Read-only: YES
 # MITRE ATT&CK: T1518.001 — Security Software Discovery
 
-Write-Output "=== ANTIVIRUS / EDR STATUS ==="
-Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue |
-    Format-Table displayName, productState, pathToSignedProductExe
+$ErrorActionPreference = 'SilentlyContinue'
 
-Write-Output ""
-Write-Output "=== WINDOWS DEFENDER ==="
+function Sec($n) { Write-Output "`n=== $n ===" }
+function Run($c) { Write-Output "PS> $c"; Invoke-Expression $c }
+
+Sec 'ANTIVIRUS_EDR_STATUS'
+Run 'Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Format-Table displayName, productState, pathToSignedProductExe'
+
+Sec 'WINDOWS_DEFENDER'
 try {
     $mpStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
     Write-Output "RealTimeProtection: $($mpStatus.RealTimeProtectionEnabled)"
@@ -22,8 +25,7 @@ try {
     Write-Output "[*] Defender status unavailable"
 }
 
-Write-Output ""
-Write-Output "=== DEFENDER EXCLUSIONS ==="
+Sec 'DEFENDER_EXCLUSIONS'
 try {
     $excl = Get-MpPreference -ErrorAction SilentlyContinue
     if ($excl.ExclusionPath) { Write-Output "ExcludedPaths: $($excl.ExclusionPath -join ', ')" }
@@ -31,14 +33,10 @@ try {
     if ($excl.ExclusionProcess) { Write-Output "ExcludedProcs: $($excl.ExclusionProcess -join ', ')" }
 } catch {}
 
-Write-Output ""
-Write-Output "=== AMSI PROVIDERS ==="
-Get-ChildItem "HKLM:\SOFTWARE\Microsoft\AMSI\Providers" -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Output "$($_.PSChildName)"
-}
+Sec 'AMSI_PROVIDERS'
+Run 'Get-ChildItem "HKLM:\SOFTWARE\Microsoft\AMSI\Providers" | ForEach-Object { Write-Output "$($_.PSChildName)" }'
 
-Write-Output ""
-Write-Output "=== APPLOCKER ==="
+Sec 'APPLOCKER'
 try {
     $rules = Get-AppLockerPolicy -Effective -ErrorAction SilentlyContinue
     if ($rules) {
@@ -51,8 +49,7 @@ try {
     Write-Output "[*] AppLocker not available"
 }
 
-Write-Output ""
-Write-Output "=== CREDENTIAL GUARD ==="
+Sec 'CREDENTIAL_GUARD'
 $cg = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root/Microsoft/Windows/DeviceGuard -ErrorAction SilentlyContinue)
 if ($cg) {
     Write-Output "VBS: $($cg.VirtualizationBasedSecurityStatus)"
@@ -61,8 +58,7 @@ if ($cg) {
     Write-Output "[*] Device Guard info unavailable"
 }
 
-Write-Output ""
-Write-Output "=== EDR PROCESSES ==="
+Sec 'EDR_PROCESSES'
 $edrProcs = @("MsSense","SenseIR","SenseCncProxy","csvhost","cb","CbDefense","CylanceSvc",
     "falcon","CSFalconService","CSFalconContainer","taniumclient","SentinelAgent","SentinelOne",
     "elastic-agent","elastic-endpoint","winlogbeat","filebeat","splunkd","ossec-agent",
@@ -75,8 +71,7 @@ if ($running) {
     Write-Output "[*] No known EDR processes detected"
 }
 
-Write-Output ""
-Write-Output "=== SYSMON ==="
+Sec 'SYSMON'
 $sysmon = Get-Service -Name "Sysmon*" -ErrorAction SilentlyContinue
 if ($sysmon) {
     Write-Output "[+] Sysmon is installed: $($sysmon.Status)"
@@ -85,21 +80,18 @@ if ($sysmon) {
     Write-Output "[*] Sysmon not installed"
 }
 
-Write-Output ""
-Write-Output "=== WINDOWS EVENT FORWARDING ==="
+Sec 'WINDOWS_EVENT_FORWARDING'
 $wef = wecutil es 2>$null
 if ($wef) { Write-Output "[+] WEF subscriptions: $($wef.Count)" } else { Write-Output "[*] No WEF" }
 
-Write-Output ""
-Write-Output "=== POWERSHELL LOGGING ==="
+Sec 'POWERSHELL_LOGGING'
 $psLog = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -ErrorAction SilentlyContinue
 $psTranscript = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription" -ErrorAction SilentlyContinue
 Write-Output "ScriptBlockLogging: $($psLog.EnableScriptBlockLogging)"
 Write-Output "Transcription: $($psTranscript.EnableTranscripting)"
 Write-Output "TranscriptionDir: $($psTranscript.OutputDirectory)"
 
-Write-Output ""
-Write-Output "=== UAC LEVEL ==="
+Sec 'UAC_LEVEL'
 $uac = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue
 Write-Output "EnableLUA: $($uac.EnableLUA)"
 Write-Output "ConsentPromptBehaviorAdmin: $($uac.ConsentPromptBehaviorAdmin)"

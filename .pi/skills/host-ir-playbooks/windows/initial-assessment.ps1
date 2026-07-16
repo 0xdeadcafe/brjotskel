@@ -1,3 +1,8 @@
+# host-ir/windows/initial-assessment.ps1 — Initial Windows host IR assessment
+# Requires: Admin recommended
+# Read-only: YES
+# MITRE ATT&CK: T1082 / T1078 / T1547 / T1059.001
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

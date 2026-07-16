@@ -1,3 +1,8 @@
+# escalate/windows/local-privesc-audit.ps1 — Assess Windows privilege-escalation paths
+# Requires: Standard user (some checks benefit from admin)
+# Read-only: YES
+# MITRE ATT&CK: T1134 / T1574 / T1053 / T1547
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

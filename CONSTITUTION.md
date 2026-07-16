@@ -39,14 +39,13 @@ When an attacker is operating inside our environment, defenders must be able to 
 
 ## Safety Rules
 
-- Require an authorization context (incident/ticket ID) for every run.
 - Only operate within the scope of the authorized incident.
-- Log all operations locally — commands, timestamps, operator, host, impact.
+- Log all operations locally with enough context to reconstruct what happened.
 - Do not operate against systems outside the authorized scope.
 - Do not exfiltrate data outside the authorized response environment.
 - Do not destroy evidence; prefer collection before action.
 - Prefer reversible actions where feasible.
-- Automate tasks, not decisions: use automation to collect, enrich, validate, and document, but require explicit operator intent for disruptive actions.
+- Use automation to collect, enrich, validate, and document. For disruptive actions, keep operator intent explicit.
 
 ## Authorized Threat Pursuit Activities
 
@@ -84,7 +83,7 @@ The following are explicitly authorized during active incident response:
 
 1. **Scope**: Only pursue within the boundaries of the authorized incident. Never touch third-party or external systems.
 2. **Evidence first**: Capture forensic snapshots before making state changes when feasible.
-3. **Document everything**: Every pivot, credential harvest, and eradication action is logged with timestamp, operator, host, and justification.
+3. **Document everything**: Every pivot, credential harvest, and eradication action is logged with enough detail to reconstruct timestamp, host, and operator intent.
 4. **Proportional action**: Use the minimum access needed to confirm and eradicate.
 5. **Automation boundary**: Automation may reduce operator busywork, but containment, account disablement, host isolation, and eradication actions require explicit operator intent and, when feasible, incident-command coordination.
 6. **Coordination**: Coordinate with the incident commander when expanding scope to new systems.

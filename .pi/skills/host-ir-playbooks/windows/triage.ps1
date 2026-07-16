@@ -1,3 +1,8 @@
+# host-ir/windows/triage.ps1 — Windows host IR triage wrapper
+# Requires: Admin recommended
+# Read-only: YES
+# MITRE ATT&CK: T1082 / T1078 / T1059.001 / T1547 / T1021
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }

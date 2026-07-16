@@ -7,7 +7,7 @@ Provide a containerized pi harness for authorized incident response, active thre
 ## Non-Goals
 
 - Attacking external or third-party systems outside incident scope.
-- Operating without authorization context.
+- Operating outside authorized incident scope.
 - Replacing mature orchestration systems before they are needed.
 
 ## Components
@@ -27,13 +27,13 @@ Tools include:
 
 ### Inventory
 
-During active incidents, track discovered hosts in `workspace/scope.yaml` for reporting.
+During active incidents, track discovered hosts in `workspace/`, for example `workspace/scope.yaml`, for reporting.
 
 ### Tools
 
 All tools (`ssh`, `nmap`, `secretsdump.py`, `crackmapexec`, etc.) are used directly. No allowlist gates.
 
-`bin/ir-log` is a minimal audit utility that appends timestamped entries to `logs/audit-YYYYMMDD.log`. It requires `BRJOTSKEL_AUTH_CONTEXT`.
+`bin/ir-log` is a minimal audit utility that appends timestamped entries to `logs/audit-YYYYMMDD.log` and records local execution context such as host, operator, and optional auth context.
 
 The `remote-session` extension (`.pi/extensions/remote-session.ts`) provides persistent multi-session management with built-in audit logging for all commands.
 
@@ -92,7 +92,7 @@ During extension/skill development, also mount host `.pi/` to `/opt/brjotskel/.p
 - First hop: Direct SSH/WinRM from harness to compromised host.
 - Multi-hop: SSH ProxyJump or dynamic SOCKS through pivot chain.
 - Windows pivoting: netsh portproxy, SSH tunnels, or Impacket SOCKS.
-- All pivots documented in `workspace/pivot-chain.md`.
+- All pivots documented in `workspace/`, for example `workspace/pivot-chain.md`.
 
 ## Future Enhancements
 

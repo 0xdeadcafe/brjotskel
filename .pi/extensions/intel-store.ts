@@ -19,8 +19,10 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { Type } from "typebox";
+import { normalizeIntelEntry, validateIntelEntry, resolveStoredPath } from "./lib/intel-helpers.ts";
+import { getFileMap, getCollectionKeyMap, addIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary } from "./lib/intel-store-core.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -84,82 +86,9 @@ function withIntelWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
 function appendTimeline(intelDir: string, entry: Record<string, any>): void {
   const timelinePath = join(intelDir, "timeline.yaml");
   const timeline = readYaml(timelinePath);
-  if (!timeline.timeline) timeline.timeline = [];
-  timeline.timeline.push(entry);
-  writeYaml(timelinePath, timeline);
+  writeYaml(timelinePath, appendTimelineEntry(timeline, entry));
 }
 
-function ensureArray<T>(value: T | T[] | undefined | null): T[] {
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
-function normalizeSource(source: any): any {
-  if (!source) return undefined;
-  if (typeof source === "string") return { method: source };
-  if (typeof source !== "object" || Array.isArray(source)) return { method: String(source) };
-
-  const out = { ...source };
-  if (!out.method && out.discovered_from) out.method = out.discovered_from;
-  return out;
-}
-
-function normalizeIntelEntry(category: "host" | "credential" | "account" | "pivot", entryData: any): any {
-  const normalized = { ...entryData };
-
-  if (normalized.source) normalized.source = normalizeSource(normalized.source);
-  if (normalized.discovered && typeof normalized.discovered === "object" && !Array.isArray(normalized.discovered)) {
-    normalized.discovered = { ...normalized.discovered };
-    if (!normalized.discovered.source && normalized.source?.method) normalized.discovered.source = normalized.source.method;
-  }
-
-  if (category === "host") {
-    if (normalized.access && typeof normalized.access === "object" && !Array.isArray(normalized.access)) {
-      normalized.access = { ...normalized.access };
-    }
-    normalized.endpoints = ensureArray(normalized.endpoints);
-    normalized.profile_artifacts = ensureArray(normalized.profile_artifacts);
-  }
-
-  if (category === "credential") {
-    normalized.valid_on = ensureArray(normalized.valid_on);
-    normalized.related_hosts = ensureArray(normalized.related_hosts);
-  }
-
-  if (category === "account") {
-    normalized.access_to = ensureArray(normalized.access_to);
-    normalized.credentials = ensureArray(normalized.credentials);
-    normalized.related_hosts = ensureArray(normalized.related_hosts);
-  }
-
-  if (category === "pivot") {
-    normalized.chain = ensureArray(normalized.chain);
-    normalized.evidence = ensureArray(normalized.evidence);
-    normalized.related_hosts = ensureArray(normalized.related_hosts);
-  }
-
-  return normalized;
-}
-
-function validateIntelEntry(category: "host" | "credential" | "account" | "pivot", entryData: any): void {
-  if (!entryData || typeof entryData !== "object" || Array.isArray(entryData)) {
-    throw new Error("Intel entry must be a YAML object/map.");
-  }
-
-  if (category === "credential") {
-    if (!entryData.type || !entryData.username) {
-      throw new Error("Credential entries require at least 'type' and 'username'.");
-    }
-  }
-  if (category === "pivot" && !entryData.target) {
-    throw new Error("Pivot entries require 'target'.");
-  }
-}
-
-function resolveStoredPath(intelDir: string, path?: string): string {
-  if (!path) return "(not stored)";
-  return isAbsolute(path) ? path : join(intelDir, path);
-}
 
 // -------------------------------------------------------------------
 // Extension
@@ -191,30 +120,15 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
 
-      const fileMap: Record<string, string> = {
-        host: "hosts.yaml",
-        credential: "credentials.yaml",
-        account: "accounts.yaml",
-        pivot: "pivots.yaml",
-      };
-
-      const collectionKey: Record<string, string> = {
-        host: "hosts",
-        credential: "credentials",
-        account: "accounts",
-        pivot: "paths",
-      };
-
-      const filePath = join(intelDir, fileMap[params.category]);
-      const key = collectionKey[params.category];
+      const filePath = join(intelDir, getFileMap()[params.category]);
+      const key = getCollectionKeyMap()[params.category];
       const entryData = normalizeIntelEntry(params.category, parseYaml(params.data, `intel_add:${params.category}:${params.id}`));
       validateIntelEntry(params.category, entryData);
 
       const total = await withIntelWriteLock(async () => {
         const store = readYaml(filePath);
-        if (!store[key]) store[key] = {};
-        store[key][params.id] = entryData;
-        writeYaml(filePath, store);
+        const updatedStore = addIntelRecord(store, key, params.id, entryData);
+        writeYaml(filePath, updatedStore);
 
         appendTimeline(intelDir, {
           timestamp: new Date().toISOString(),
@@ -225,7 +139,7 @@ export default function (pi: ExtensionAPI) {
           operator: process.env.USER || "unknown",
         });
 
-        return Object.keys(store[key]).length;
+        return Object.keys(updatedStore[key]).length;
       });
 
       return {
@@ -267,82 +181,13 @@ export default function (pi: ExtensionAPI) {
       switch (params.query_type) {
         case "for_host": {
           if (!params.target) throw new Error("'target' parameter required for for_host query");
-          const hostInfo = hosts[params.target];
-          const hostCreds = Object.entries(credentials).filter(([_, c]: [string, any]) =>
-            c.valid_on?.includes(params.target)
-          );
-          const hostAccounts = Object.entries(accounts).filter(([_, a]: [string, any]) =>
-            a.access_to?.includes(params.target)
-          );
-          const hostPivots = Object.entries(pivots).filter(([_, p]: [string, any]) =>
-            p.target === params.target
-          );
-
-          result = `=== Host: ${params.target} ===\n`;
-          if (hostInfo) {
-            result += `IP: ${hostInfo.ip || "unknown"}\nHostname: ${hostInfo.hostname || params.target}\nPlatform: ${hostInfo.platform || "unknown"}\nRole: ${hostInfo.role || "unknown"}\nStatus: ${hostInfo.status || "unknown"}\nAttacker role: ${hostInfo.attacker_role || "unknown"}\n`;
-            if (hostInfo.access?.method) {
-              result += `Access: ${hostInfo.access.method} via ${hostInfo.access.via || "unknown"}`;
-              if (hostInfo.access.credential) result += ` using ${hostInfo.access.credential}`;
-              if (hostInfo.access.port) result += ` port ${hostInfo.access.port}`;
-              result += `\n`;
-            }
-            if (hostInfo.source) {
-              result += `Source: ${hostInfo.source.host || "?"} via ${hostInfo.source.method || "?"}`;
-              if (hostInfo.source.path) result += ` path=${hostInfo.source.path}`;
-              if (hostInfo.source.tool) result += ` tool=${hostInfo.source.tool}`;
-              if (hostInfo.source.playbook) result += ` playbook=${hostInfo.source.playbook}`;
-              result += `\n`;
-            }
-            if ((hostInfo.endpoints || []).length > 0) {
-              result += `Endpoints: ${(hostInfo.endpoints || []).slice(0, 6).join(", ")}`;
-              if ((hostInfo.endpoints || []).length > 6) result += ` ...`;
-              result += `\n`;
-            }
-            if ((hostInfo.profile_artifacts || []).length > 0) {
-              result += `Profile artifacts: ${(hostInfo.profile_artifacts || []).slice(0, 6).join(", ")}`;
-              if ((hostInfo.profile_artifacts || []).length > 6) result += ` ...`;
-              result += `\n`;
-            }
-          } else {
-            result += "(not in hosts.yaml)\n";
-          }
-          result += `\nCredentials valid on this host (${hostCreds.length}):\n`;
-          for (const [id, c] of hostCreds as [string, any][]) {
-            result += `  ${id}: ${c.type} — ${c.username}${c.domain ? "@" + c.domain : ""} [${c.status}]\n`;
-          }
-          result += `\nAccounts with access (${hostAccounts.length}):\n`;
-          for (const [id, a] of hostAccounts as [string, any][]) {
-            result += `  ${id}: ${a.type} — ${(a.privileges || []).join(", ")} [${a.status}]\n`;
-          }
-          result += `\nPivot paths (${hostPivots.length}):\n`;
-          for (const [id, p] of hostPivots as [string, any][]) {
-            const hops = (p.chain || []).map((h: any) => h.hop).join(" → ");
-            result += `  ${id}: ${hops} [${p.status}]\n`;
-          }
+          result = formatHostQueryResult(hosts, credentials, accounts, pivots, params.target);
           break;
         }
 
         case "for_credential": {
           if (!params.target) throw new Error("'target' parameter required for for_credential query");
-          const cred = credentials[params.target];
-          if (!cred) {
-            result = `Credential '${params.target}' not found.\nAvailable: ${Object.keys(credentials).join(", ") || "none"}`;
-          } else {
-            result = `=== Credential: ${params.target} ===\n`;
-            result += `Type: ${cred.type}\nUsername: ${cred.username}\nDomain: ${cred.domain || "local"}\n`;
-            result += `Status: ${cred.status}\n`;
-            result += `Valid on: ${(cred.valid_on || []).join(", ")}\n`;
-            result += `Source: ${cred.source?.host || "?"} via ${cred.source?.method || "?"}`;
-            if (cred.source?.path) result += ` path=${cred.source.path}`;
-            if (cred.source?.tool) result += ` tool=${cred.source.tool}`;
-            if (cred.source?.playbook) result += ` playbook=${cred.source.playbook}`;
-            result += `\n`;
-            if ((cred.related_hosts || []).length > 0) result += `Related hosts: ${(cred.related_hosts || []).join(", ")}\n`;
-            if (cred.key_file) result += `Key file: ${cred.key_file}\n`;
-            if (cred.ticket_file) result += `Ticket: ${cred.ticket_file}\n`;
-            if (cred.notes) result += `Notes: ${cred.notes}\n`;
-          }
+          result = formatCredentialQueryResult(credentials, params.target);
           break;
         }
 
@@ -378,24 +223,8 @@ export default function (pi: ExtensionAPI) {
 
         case "search": {
           if (!params.keyword) throw new Error("'keyword' parameter required for search query");
-          const kw = params.keyword.toLowerCase();
-          const matches: string[] = [];
-
-          for (const [id, h] of Object.entries(hosts) as [string, any][]) {
-            if (id.toLowerCase().includes(kw) || JSON.stringify(h).toLowerCase().includes(kw)) matches.push(`host:${id}`);
-          }
-          for (const [id, c] of Object.entries(credentials) as [string, any][]) {
-            if (id.toLowerCase().includes(kw) || JSON.stringify(c).toLowerCase().includes(kw)) matches.push(`credential:${id}`);
-          }
-          for (const [id, a] of Object.entries(accounts) as [string, any][]) {
-            if (id.toLowerCase().includes(kw) || JSON.stringify(a).toLowerCase().includes(kw)) matches.push(`account:${id}`);
-          }
-          for (const [id, p] of Object.entries(pivots) as [string, any][]) {
-            if (id.toLowerCase().includes(kw) || JSON.stringify(p).toLowerCase().includes(kw)) matches.push(`pivot:${id}`);
-          }
-
-          result = `Search: "${params.keyword}" — ${matches.length} match(es)\n`;
-          result += matches.map(m => `  ${m}`).join("\n") || "  (no matches)";
+          const matches = searchIntel(hosts, credentials, accounts, pivots, params.keyword);
+          result = formatSearchResult(params.keyword, matches);
           break;
         }
       }
@@ -573,49 +402,8 @@ export default function (pi: ExtensionAPI) {
       const pivots = readYaml(join(intelDir, "pivots.yaml")).paths || {};
       const timeline = readYaml(join(intelDir, "timeline.yaml")).timeline || [];
 
-      // Status breakdowns
-      const hostStatuses: Record<string, number> = {};
-      for (const h of Object.values(hosts) as any[]) {
-        const s = h.status || "unknown";
-        hostStatuses[s] = (hostStatuses[s] || 0) + 1;
-      }
-
-      const credTypes: Record<string, number> = {};
-      for (const c of Object.values(credentials) as any[]) {
-        const t = c.type || "unknown";
-        credTypes[t] = (credTypes[t] || 0) + 1;
-      }
-
-      const profileDerivedHosts = Object.values(hosts).filter((h: any) => (h.endpoints || []).length > 0 || (h.profile_artifacts || []).length > 0).length;
-      const sourcePathEntries = ([] as any[])
-        .concat(Object.values(hosts) as any[])
-        .concat(Object.values(credentials) as any[])
-        .concat(Object.values(accounts) as any[])
-        .concat(Object.values(pivots) as any[])
-        .filter((x: any) => x.source?.path).length;
-      const evidencePivots = Object.values(pivots).filter((p: any) => (p.evidence || []).length > 0).length;
-
-      const lines = [
-        "=== Intel Store Summary ===",
-        "",
-        `Hosts: ${Object.keys(hosts).length}`,
-        ...Object.entries(hostStatuses).map(([s, n]) => `  ${s}: ${n}`),
-        `  profile-derived/artifact-rich: ${profileDerivedHosts}`,
-        "",
-        `Credentials: ${Object.keys(credentials).length}`,
-        ...Object.entries(credTypes).map(([t, n]) => `  ${t}: ${n}`),
-        "",
-        `Accounts: ${Object.keys(accounts).length}`,
-        `Pivot paths: ${Object.keys(pivots).length}`,
-        `  with evidence: ${evidencePivots}`,
-        `Entries with source.path: ${sourcePathEntries}`,
-        `Timeline entries: ${timeline.length}`,
-        "",
-        `Intel dir: ${intelDir}`,
-      ];
-
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
+        content: [{ type: "text", text: buildIntelSummary(hosts, credentials, accounts, pivots, timeline, intelDir) }],
         details: {
           hosts: Object.keys(hosts).length,
           credentials: Object.keys(credentials).length,

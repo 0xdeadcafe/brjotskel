@@ -71,6 +71,6 @@ RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /workspace 
 
 ENV BRJOTSKEL_LOG_DIR=/opt/brjotskel/logs
 
-WORKDIR /workspace
+WORKDIR /opt/brjotskel
 
-CMD ["bash"]
+CMD ["pi"]

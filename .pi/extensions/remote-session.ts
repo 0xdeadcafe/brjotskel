@@ -61,6 +61,8 @@ import { mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { psSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes } from "./lib/remote-session-core.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 
@@ -82,7 +84,6 @@ interface SessionInfo {
   shellFamily: "posix" | "powershell" | "cmd" | "unknown";
 }
 
-type ShellFamily = SessionInfo["shellFamily"];
 
 interface RemoteSession {
   info: SessionInfo;
@@ -142,13 +143,6 @@ let defaultSessionName: string | null = null;
 const LOG_DIR = join(process.env.BRJOTSKEL_LOG_DIR || join(process.cwd(), "logs"), "remote-sessions");
 const COMMAND_TIMEOUT_MS = 60_000;
 
-function psSingleQuote(value: string): string {
-  return value.replace(/'/g, "''");
-}
-
-function shellSingleQuote(value: string): string {
-  return value.replace(/'/g, `'"'"'`);
-}
 
 function killTrackedProcess(proc: ChildProcess): void {
   try {
@@ -159,52 +153,12 @@ function killTrackedProcess(proc: ChildProcess): void {
 }
 
 function processTelnetChunk(session: RemoteSession, data: Buffer): string {
-  const state = session.telnetState || { mode: "data" as const };
-  const out: number[] = [];
-  const IAC = 255;
-  const DO = 253;
-  const DONT = 254;
-  const WILL = 251;
-  const WONT = 252;
-  const SB = 250;
-  const SE = 240;
-
-  for (const byte of data) {
-    switch (state.mode) {
-      case "data":
-        if (byte === IAC) state.mode = "iac";
-        else out.push(byte);
-        break;
-      case "iac":
-        if (byte === IAC) {
-          out.push(byte);
-          state.mode = "data";
-        } else if ([DO, DONT, WILL, WONT].includes(byte)) {
-          state.command = byte;
-          state.mode = "iac-command";
-        } else if (byte === SB) {
-          state.mode = "sb";
-        } else {
-          state.mode = "data";
-        }
-        break;
-      case "iac-command":
-        if (state.command === DO) session.process.stdin?.write(Buffer.from([IAC, WONT, byte]));
-        else if (state.command === WILL) session.process.stdin?.write(Buffer.from([IAC, DONT, byte]));
-        state.command = undefined;
-        state.mode = "data";
-        break;
-      case "sb":
-        if (byte === IAC) state.mode = "sb-iac";
-        break;
-      case "sb-iac":
-        state.mode = byte === SE ? "data" : "sb";
-        break;
-    }
+  const result = processTelnetBytes(session.telnetState, data);
+  for (const reply of result.replies) {
+    session.process.stdin?.write(Buffer.from(reply));
   }
-
-  session.telnetState = state;
-  return Buffer.from(out).toString();
+  session.telnetState = result.state;
+  return result.text;
 }
 
 function getLocalHostname(): string {
@@ -226,67 +180,14 @@ function logToSession(sessionName: string, direction: ">>>" | "<<<" | "---", con
 }
 
 function getSession(name?: string): RemoteSession {
-  if (!name) {
-    if (!defaultSessionName || !sessions.has(defaultSessionName)) {
-      if (sessions.size === 0) {
-        throw new Error("No active remote sessions. Use remote_connect first.");
-      }
-      if (sessions.size === 1) {
-        return sessions.values().next().value!;
-      }
-      const names = [...sessions.keys()].join(", ");
-      throw new Error(`Multiple sessions active (${names}). Specify which session to use with the 'session' parameter.`);
-    }
-    return sessions.get(defaultSessionName)!;
-  }
-  const session = sessions.get(name);
-  if (!session) {
-    const available = sessions.size > 0 ? ` Available: ${[...sessions.keys()].join(", ")}` : "";
-    throw new Error(`Session '${name}' not found.${available}`);
-  }
-  return session;
+  const selectedName = chooseSessionName(name, [...sessions.keys()], defaultSessionName);
+  return sessions.get(selectedName)!;
 }
 
 // -------------------------------------------------------------------
 // SSH Connection
 // -------------------------------------------------------------------
 
-function detectSshShell(buffer: string, platformHint?: SessionInfo["platform"], shellHint?: ShellFamily): Pick<SessionInfo, "platform" | "shellFamily"> | null {
-  const text = buffer.replace(/\r/g, "");
-  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
-
-  if (shellHint === "posix") {
-    if (lines.length > 0) return { platform: platformHint === "macos" ? "macos" : (platformHint === "linux" ? "linux" : "linux"), shellFamily: "posix" };
-  }
-  if (shellHint === "powershell") {
-    if (lines.length > 0) return { platform: "windows", shellFamily: "powershell" };
-  }
-  if (shellHint === "cmd") {
-    if (lines.length > 0) return { platform: "windows", shellFamily: "cmd" };
-  }
-
-  for (const line of lines) {
-    if (/^PS\s+.*>\s*$/.test(line)) return { platform: "windows", shellFamily: "powershell" };
-    if (/^[A-Za-z]:\\.*>\s*$/.test(line)) return { platform: "windows", shellFamily: "cmd" };
-    if (/^[^\s@]+@[^\s:]+:.*[$#]\s*$/.test(line)) return { platform: "linux", shellFamily: "posix" };
-    if (/^.*\s[#$>]\s*$/.test(line) && platformHint === "network-device") {
-      return { platform: "network-device", shellFamily: "unknown" };
-    }
-  }
-
-  if (platformHint === "linux" || platformHint === "macos") {
-    if (lines.some(line => /[$#]\s*$/.test(line) || /^(Linux|Darwin)$/i.test(line))) {
-      return { platform: platformHint, shellFamily: "posix" };
-    }
-  }
-
-  if (platformHint === "windows") {
-    if (lines.some(line => /^PS\s+.*>\s*$/.test(line))) return { platform: "windows", shellFamily: "powershell" };
-    if (lines.some(line => /^[A-Za-z]:\\.*>\s*$/.test(line))) return { platform: "windows", shellFamily: "cmd" };
-  }
-
-  return null;
-}
 
 function connectSSH(name: string, target: string, options: { port?: number; identity?: string; proxyJump?: string; password?: string; platformHint?: SessionInfo["platform"]; shellHint?: ShellFamily } = {}): Promise<RemoteSession> {
   return new Promise((resolve, reject) => {
@@ -613,46 +514,6 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
 // Command Execution
 // -------------------------------------------------------------------
 
-function cleanCommandOutput(session: RemoteSession, command: string, output: string): string {
-  let text = output.replace(/\r/g, "").trim();
-  if (!text) return text;
-
-  const lines = text.split("\n");
-  const trimmedCommand = command.trim();
-
-  while (lines.length > 0) {
-    const first = lines[0].trim();
-    if (!first) {
-      lines.shift();
-      continue;
-    }
-    if (first === trimmedCommand) {
-      lines.shift();
-      continue;
-    }
-    if (trimmedCommand && first.endsWith(trimmedCommand)) {
-      lines.shift();
-      continue;
-    }
-    break;
-  }
-
-  while (lines.length > 0) {
-    const last = lines[lines.length - 1].trim();
-    if (!last) {
-      lines.pop();
-      continue;
-    }
-    if (/^PS\s+.*>\s*$/.test(last) || /^[A-Za-z]:\\.*>\s*$/.test(last) || /^[^\s@]+@[^\s:]+:.*[$#]\s*$/.test(last)) {
-      lines.pop();
-      continue;
-    }
-    break;
-  }
-
-  text = lines.join("\n").trim();
-  return text;
-}
 
 function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<string> {
   session.execChain = session.execChain.catch(() => undefined).then(() => new Promise<string>((resolve, reject) => {
@@ -719,13 +580,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       timeout,
     });
 
-    const markerCmd = session.info.shellFamily === "powershell"
-      ? `${command}\nWrite-Host '${psSingleQuote(marker)}'`
-      : session.info.shellFamily === "cmd"
-        ? `${command}\r\necho ${marker}`
-        : `${command}\necho '${shellSingleQuote(marker)}'`;
-
-    session.process.stdin!.write(markerCmd + "\n");
+    session.process.stdin!.write(buildMarkerCommand(session.info.shellFamily, command, marker) + "\n");
   }));
 
   return session.execChain as Promise<string>;
@@ -1149,21 +1004,9 @@ export default function (pi: ExtensionAPI) {
       if (params.ssh_port) args.push("-p", String(params.ssh_port));
       if (params.identity) args.push("-i", params.identity);
 
-      let forwardSpec: string;
-      switch (params.type) {
-        case "local":
-          forwardSpec = `L ${params.local_port}:${params.remote_host}:${params.remote_port}`;
-          args.push("-L", `${params.local_port}:${params.remote_host}:${params.remote_port}`);
-          break;
-        case "remote":
-          forwardSpec = `R ${params.remote_port}:localhost:${params.local_port}`;
-          args.push("-R", `${params.remote_port}:localhost:${params.local_port}`);
-          break;
-        case "dynamic":
-          forwardSpec = `D ${params.local_port}`;
-          args.push("-D", String(params.local_port));
-          break;
-      }
+      const tunnelSpec = buildTunnelSpec(params.type, params.local_port, params.remote_host, params.remote_port);
+      const forwardSpec = tunnelSpec.forwardSpec;
+      args.push(...tunnelSpec.sshArgs);
 
       args.push(params.via);
 
@@ -1212,11 +1055,7 @@ export default function (pi: ExtensionAPI) {
 
       tunnelCounter++;
       const tunnelId = `tun-${tunnelCounter}`;
-      const description = params.description || (params.type === "dynamic"
-        ? `SOCKS proxy via ${params.via}`
-        : params.type === "local"
-          ? `local forward ${params.local_port}→${params.remote_host}:${params.remote_port} via ${params.via}`
-          : `remote forward ${params.remote_port}→localhost:${params.local_port} via ${params.via}`);
+      const description = buildTunnelDescription(params.type, params.via, params.local_port, params.remote_host, params.remote_port, params.description);
 
       const tunnel: TunnelInfo = {
         id: tunnelId,
@@ -1252,14 +1091,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
       }
 
-      let usageHint: string;
-      if (params.type === "local") {
-        usageHint = `Access via: localhost:${params.local_port}\nPivot: remote_connect(protocol="ssh", target="user@localhost", port=${params.local_port}, name="next-hop")`;
-      } else if (params.type === "dynamic") {
-        usageHint = `SOCKS5 proxy at: localhost:${params.local_port}\nUsage: proxychains nmap -sT -Pn <targets> or proxychains crackmapexec smb <targets>`;
-      } else {
-        usageHint = `Remote forward active: connections to ${params.via}:${params.remote_port} are forwarded to localhost:${params.local_port} on the harness.`;
-      }
+      const usageHint = buildTunnelUsageHint(params.type, params.via, params.local_port, params.remote_port);
 
       return {
         content: [{ type: "text", text: `Tunnel created: ${tunnelId}\n${description}\n\n${usageHint}` }],
