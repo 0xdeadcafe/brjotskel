@@ -2,6 +2,14 @@ import { psSingleQuote, shellSingleQuote, type ShellFamily } from "./remote-help
 
 export type TunnelType = "local" | "remote" | "dynamic";
 
+export function parseWinRmTarget(target: string, explicitUser?: string): { computerName: string; user?: string } {
+  const at = target.lastIndexOf("@");
+  const parsedUser = at === -1 ? undefined : target.slice(0, at) || undefined;
+  const computerName = at === -1 ? target : target.slice(at + 1);
+  const user = explicitUser || parsedUser;
+  return user ? { computerName, user } : { computerName };
+}
+
 export interface TelnetState {
   mode: "data" | "iac" | "iac-command" | "sb" | "sb-iac";
   command?: number;

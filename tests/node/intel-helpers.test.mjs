@@ -6,6 +6,7 @@ import {
   normalizeSource,
   normalizeIntelEntry,
   validateIntelEntry,
+  resolveIntelDir,
   resolveStoredPath,
 } from '../../.pi/extensions/lib/intel-helpers.ts';
 
@@ -52,6 +53,11 @@ test('validateIntelEntry enforces minimal required fields', () => {
   assert.throws(() => validateIntelEntry('credential', { username: 'alice' }), /type' and 'username/);
   assert.throws(() => validateIntelEntry('pivot', { chain: [] }), /require 'target'/);
   assert.doesNotThrow(() => validateIntelEntry('credential', { type: 'password', username: 'alice' }));
+});
+
+test('resolveIntelDir defaults to workspace/intel and honors env override', () => {
+  assert.equal(resolveIntelDir('/opt/brjotskel'), '/opt/brjotskel/workspace/intel');
+  assert.equal(resolveIntelDir('/opt/brjotskel', '/custom/intel'), '/custom/intel');
 });
 
 test('resolveStoredPath preserves absolute paths and expands relative ones', () => {

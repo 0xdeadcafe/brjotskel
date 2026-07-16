@@ -38,8 +38,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Impacket & NetExec ---
-RUN pip3 install --no-cache-dir --break-system-packages impacket \
-    && pip3 install --no-cache-dir --break-system-packages git+https://github.com/Pennyw0rth/NetExec 2>/dev/null \
+RUN pip3 install --no-cache-dir --break-system-packages impacket
+RUN pip3 install --no-cache-dir --break-system-packages git+https://github.com/Pennyw0rth/NetExec 2>/dev/null \
     || echo 'NetExec install skipped — install manually if needed'
 
 # --- Node.js (for pi agent / extensions) ---
@@ -70,6 +70,7 @@ RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /workspace 
     && pi install -l --approve npm:pi-smart-fetch
 
 ENV BRJOTSKEL_LOG_DIR=/opt/brjotskel/logs
+ENV BRJOTSKEL_INTEL_DIR=/opt/brjotskel/workspace/intel
 
 WORKDIR /opt/brjotskel
 

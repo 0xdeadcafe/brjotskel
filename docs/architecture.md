@@ -27,7 +27,7 @@ Tools include:
 
 ### Inventory
 
-During active incidents, track discovered hosts in `workspace/`, for example `workspace/scope.yaml`, for reporting.
+During active incidents, track discovered hosts in `workspace/`, for example `workspace/scope.yaml`, for reporting. The structured intel store also defaults to `workspace/intel/` so it persists when the repo's `workspace/` directory is mounted into the container.
 
 ### Tools
 

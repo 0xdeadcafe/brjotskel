@@ -61,8 +61,8 @@ import { mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { psSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
-import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes } from "./lib/remote-session-core.ts";
+import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget } from "./lib/remote-session-core.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 
@@ -308,12 +308,14 @@ function connectSSH(name: string, target: string, options: { port?: number; iden
 // WinRM Connection (via PowerShell)
 // -------------------------------------------------------------------
 
-function connectWinRM(name: string, target: string, options: { user?: string; password?: string } = {}): Promise<RemoteSession> {
+function connectWinRM(name: string, target: string, options: { user?: string; password?: string; port?: number } = {}): Promise<RemoteSession> {
   return new Promise((resolve, reject) => {
-    const safeTarget = psSingleQuote(target);
+    const parsed = parseWinRmTarget(target, options.user);
+    const safeTarget = psSingleQuote(parsed.computerName);
+    const portArg = options.port ? ` -Port ${options.port}` : "";
     const psCommand = options.password
-      ? `$pw = ConvertTo-SecureString '${psSingleQuote(options.password)}' -AsPlainText -Force; $cred = New-Object PSCredential('${psSingleQuote(options.user || "")}', $pw); Enter-PSSession -ComputerName '${safeTarget}' -Credential $cred`
-      : `Enter-PSSession -ComputerName '${safeTarget}'`;
+      ? `$pw = ConvertTo-SecureString '${psSingleQuote(options.password)}' -AsPlainText -Force; $cred = New-Object PSCredential('${psSingleQuote(parsed.user || "")}', $pw); Enter-PSSession -ComputerName '${safeTarget}'${portArg} -Credential $cred`
+      : `Enter-PSSession -ComputerName '${safeTarget}'${portArg}`;
 
     const proc = spawn("pwsh", ["-NoProfile", "-NoLogo", "-Command", "-"], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -611,7 +613,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       protocol: StringEnum(["ssh", "winrm", "tcp", "telnet"] as const),
-      target: Type.String({ description: "Connection target: user@host for SSH/WinRM, host:port for TCP/telnet" }),
+      target: Type.String({ description: "Connection target: user@host or host for SSH/WinRM, host:port for TCP/telnet" }),
       name: Type.String({ description: "Session name for identification (e.g., 'web01', 'dc01', 'pivot-host')" }),
       port: Type.Optional(Type.Number({ description: "Override port (SSH default: 22, WinRM: 5985, TCP: required in target)" })),
       identity: Type.Optional(Type.String({ description: "SSH identity file path (e.g., recovered key from compromised host)" })),
@@ -659,6 +661,7 @@ export default function (pi: ExtensionAPI) {
             session = await connectWinRM(params.name, params.target, {
               user: params.user,
               password: params.password,
+              port: params.port,
             });
             break;
           case "tcp": {

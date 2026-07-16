@@ -19,9 +19,10 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { normalizeIntelEntry, validateIntelEntry, resolveStoredPath } from "./lib/intel-helpers.ts";
+import { normalizeIntelEntry, validateIntelEntry, resolveStoredPath, resolveIntelDir } from "./lib/intel-helpers.ts";
 import { getFileMap, getCollectionKeyMap, addIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary } from "./lib/intel-store-core.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -31,7 +32,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // -------------------------------------------------------------------
 
 function getIntelDir(): string {
-  const base = process.env.BRJOTSKEL_INTEL_DIR || join(process.cwd(), "intel");
+  const base = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
   mkdirSync(base, { recursive: true });
   mkdirSync(join(base, "keys"), { recursive: true });
   mkdirSync(join(base, "loot"), { recursive: true });
@@ -40,7 +41,6 @@ function getIntelDir(): string {
 
 function parseYaml(content: string, source = "input"): any {
   try {
-    const { execSync } = require("node:child_process");
     const result = execSync(`python3 -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(sys.stdin.read()) or {}))"`, {
       input: content,
       encoding: "utf-8",
@@ -60,7 +60,6 @@ function readYaml(filePath: string): any {
 
 function writeYaml(filePath: string, data: any): void {
   try {
-    const { execSync } = require("node:child_process");
     const json = JSON.stringify(data);
     const yaml = execSync(`python3 -c "import yaml,json,sys; data=json.loads(sys.stdin.read()); print(yaml.dump(data, default_flow_style=False, sort_keys=False))"`, {
       input: json,

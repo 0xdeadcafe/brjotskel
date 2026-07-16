@@ -8,6 +8,7 @@ import {
   buildTunnelDescription,
   buildTunnelUsageHint,
   processTelnetBytes,
+  parseWinRmTarget,
 } from '../../.pi/extensions/lib/remote-session-core.ts';
 
 test('chooseSessionName resolves default, single-session, and explicit selection', () => {
@@ -49,6 +50,12 @@ test('buildTunnelSpec, description, and usage hint format each tunnel type', () 
   assert.match(buildTunnelUsageHint('local', 'root@web01', 2222), /remote_connect\(protocol="ssh", target="user@localhost", port=2222, name="next-hop"\)/);
   assert.match(buildTunnelUsageHint('dynamic', 'root@web01', 1080), /SOCKS5 proxy at: localhost:1080/);
   assert.match(buildTunnelUsageHint('remote', 'root@web01', 8080, 8443), /connections to root@web01:8443 are forwarded to localhost:8080/);
+});
+
+test('parseWinRmTarget supports user@host targets and explicit user override', () => {
+  assert.deepEqual(parseWinRmTarget('administrator@dc01'), { computerName: 'dc01', user: 'administrator' });
+  assert.deepEqual(parseWinRmTarget('corp\\alice@dc01', 'corp\\bob'), { computerName: 'dc01', user: 'corp\\bob' });
+  assert.deepEqual(parseWinRmTarget('dc01'), { computerName: 'dc01' });
 });
 
 test('processTelnetBytes strips negotiations and emits reply frames', () => {

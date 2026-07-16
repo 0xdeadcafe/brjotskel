@@ -1,5 +1,9 @@
 import { isAbsolute, join } from "node:path";
 
+export function resolveIntelDir(cwd: string, envIntelDir?: string): string {
+  return envIntelDir || join(cwd, "workspace", "intel");
+}
+
 export function ensureArray<T>(value: T | T[] | undefined | null): T[] {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];

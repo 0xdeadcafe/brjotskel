@@ -157,6 +157,9 @@ remote_exec(session="web01", command="hostname; id; ss -tunap")
 remote_tunnel(type="dynamic", via="root@10.10.10.5", local_port=1080, description="SOCKS via web01")
 remote_sessions()
 
+# WinRM accepts either target="user@host" or target="host" with user="user".
+remote_connect(protocol="winrm", target="administrator@10.10.10.20", name="dc01", password="<password>", port=5986)
+
 # If a Unix SSH target is misdetected, force shell framing explicitly:
 remote_connect(protocol="ssh", target="x0r@172.17.0.1", name="gibson", password="<password>", platform_hint="linux", shell_hint="posix")
 ```
@@ -199,7 +202,7 @@ See [docs/intel-import-workflow.md](docs/intel-import-workflow.md) for more patt
 
 - Container working directory: `/opt/brjotskel`
 - Repo-mounted operator scratch space: `/opt/brjotskel/workspace`
-- The intel store defaults to `./intel/` under the current working directory, or `BRJOTSKEL_INTEL_DIR` if set.
+- The intel store defaults to `./workspace/intel/` under the current working directory, or `BRJOTSKEL_INTEL_DIR` if set.
 - Remote session logs default to `$BRJOTSKEL_LOG_DIR/remote-sessions/`; otherwise they are written under `./logs/remote-sessions/` in the working directory.
 - `ir-log` writes daily audit files to `$BRJOTSKEL_LOG_DIR` when set and records the local host, operator, event, and optional `BRJOTSKEL_AUTH_CONTEXT`.
 - During active development, mount host `.pi/` to `/opt/brjotskel/.pi` so extension and skill edits persist without an image rebuild.
