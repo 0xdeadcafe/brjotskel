@@ -9,6 +9,11 @@ import {
   buildTunnelUsageHint,
   processTelnetBytes,
   parseWinRmTarget,
+  detectRelayMethods,
+  buildRelayCommand,
+  buildRelayCleanupCommand,
+  buildRelayProbeCommand,
+  buildRelayVerifyCommand,
 } from '../../.pi/extensions/lib/remote-session-core.ts';
 
 test('chooseSessionName resolves default, single-session, and explicit selection', () => {
@@ -95,4 +100,73 @@ test('processTelnetBytes handles escaped IAC and subnegotiation blocks', () => {
   assert.equal(result.text, 'A�BC');
   assert.deepEqual(result.replies, []);
   assert.deepEqual(result.state, { mode: 'data' });
+});
+
+// --- Relay helper tests ---
+
+test('detectRelayMethods identifies tools from probe output (Linux)', () => {
+  const probe = '/usr/bin/socat\n/usr/bin/ncat\n/bin/nc\nnetcat-openbsd\n/bin/bash\n';
+  const methods = detectRelayMethods(probe, 'linux');
+  assert.equal(methods[0], 'socat');
+  assert.ok(methods.includes('ncat'));
+  assert.ok(methods.includes('nc-openbsd'));
+  assert.ok(methods.includes('bash-devtcp'));
+});
+
+test('detectRelayMethods returns netsh-portproxy for Windows', () => {
+  const probe = 'netsh\nncat';
+  const methods = detectRelayMethods(probe, 'windows');
+  assert.equal(methods[0], 'netsh-portproxy');
+  assert.ok(methods.includes('ncat'));
+});
+
+test('detectRelayMethods returns empty array when nothing found', () => {
+  const methods = detectRelayMethods('', 'linux');
+  assert.deepEqual(methods, []);
+});
+
+test('buildRelayCommand generates correct commands for each method', () => {
+  const base = { listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 };
+
+  const socat = buildRelayCommand({ ...base, method: 'socat' });
+  assert.match(socat, /socat TCP-LISTEN:4422,bind=0\.0\.0\.0,fork,reuseaddr TCP:10\.10\.20\.5:22 &/);
+
+  const ncat = buildRelayCommand({ ...base, method: 'ncat' });
+  assert.match(ncat, /ncat -l 0\.0\.0\.0 4422 --sh-exec 'ncat 10\.10\.20\.5 22' &/);
+
+  const netsh = buildRelayCommand({ ...base, method: 'netsh-portproxy' });
+  assert.match(netsh, /netsh interface portproxy add v4tov4 listenport=4422 listenaddress=0\.0\.0\.0 connectport=22 connectaddress=10\.10\.20\.5/);
+
+  const ncBsd = buildRelayCommand({ ...base, method: 'nc-openbsd' });
+  assert.match(ncBsd, /mkfifo/);
+  assert.match(ncBsd, /nc -l 0\.0\.0\.0 4422/);
+});
+
+test('buildRelayCleanupCommand generates correct teardown for each method', () => {
+  const base = { listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 };
+
+  const socat = buildRelayCleanupCommand({ ...base, method: 'socat' });
+  assert.match(socat, /pkill -f.*socat TCP-LISTEN:4422/);
+
+  const netsh = buildRelayCleanupCommand({ ...base, method: 'netsh-portproxy' });
+  assert.match(netsh, /netsh interface portproxy delete v4tov4 listenport=4422/);
+
+  const nc = buildRelayCleanupCommand({ ...base, method: 'nc-openbsd' });
+  assert.match(nc, /rm -f \/tmp\/.r4422/);
+});
+
+test('buildRelayProbeCommand returns platform-appropriate probe', () => {
+  const linux = buildRelayProbeCommand('linux');
+  assert.match(linux, /which socat ncat nc/);
+
+  const win = buildRelayProbeCommand('windows');
+  assert.match(win, /Write-Output.*netsh/);
+});
+
+test('buildRelayVerifyCommand checks listener presence', () => {
+  const verify = buildRelayVerifyCommand({ method: 'socat', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 });
+  assert.match(verify, /grep.*:4422/);
+
+  const netshVerify = buildRelayVerifyCommand({ method: 'netsh-portproxy', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 });
+  assert.match(netshVerify, /netsh interface portproxy show/);
 });

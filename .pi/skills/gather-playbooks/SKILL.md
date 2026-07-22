@@ -41,6 +41,7 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
+| `linux/first-look.sh` | situational | 30-sec snapshot: who's on, active connections, recent files, staging areas, immediate persistence |
 | `linux/hashdump.sh` | credentials | /etc/shadow, /etc/passwd, opasswd |
 | `linux/ssh-keys.sh` | credentials | SSH private keys, authorized_keys, known_hosts |
 | `linux/enum-credentials.sh` | credentials | AWS keys, Docker creds, .env files, history, tokens |
@@ -61,6 +62,7 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
+| `windows/first-look.ps1` | situational | 30-sec snapshot: who's on, connections, recent files, suspicious tasks/services, Defender state |
 | `windows/hashdump.ps1` | credentials | SAM/SYSTEM hive export (requires admin) |
 | `windows/enum-credentials.ps1` | credentials | Credential Manager, vault, WiFi, cached logons |
 | `windows/enum-unattend-autologon.ps1` | credentials | Unattend/sysprep files, autologon registry values, and plaintext credential hints |
@@ -89,6 +91,7 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
+| `macos/first-look.sh` | situational | 30-sec snapshot: who's on, connections, staging areas, launchd persistence, security state |
 | `macos/enum-system.sh` | system | `sw_vers`, hardware/software profile, users, launchd jobs, FileVault/SIP state |
 | `macos/enum-network.sh` | network | Interfaces, routes, DNS, proxies, Wi-Fi prefs, live connections, ARP |
 | `macos/enum-persistence.sh` | persistence | LaunchDaemons, LaunchAgents, shell/profile hooks, autologin, cron/at artifacts |
@@ -97,6 +100,48 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 | `macos/enum-launchd.sh` | persistence | Loaded `launchctl` jobs plus launchd plist labels, programs, watch paths, and logging paths |
 | `macos/enum-unified-logs.sh` | logs | Recent `log show` output for launchd, auth, exec/spawn, and network activity |
 | `macos/enum-browser-artifacts.sh` | browser | Safari, Chrome, and Firefox artifact locations and recent session/history metadata |
+
+## First Look — 30-Second Situational Awareness
+
+Before running full triage, use `first-look` to get immediate answers:
+
+- Am I alone on this box?
+- What's talking outbound right now?
+- Are there attacker staging files in /tmp, /dev/shm, C:\Users\Public?
+- Is there any immediate persistence threat (cron, tasks, services)?
+- Is security tooling still active or has it been tampered with?
+
+### Usage
+
+```text
+# Linux — inline (nothing touches disk)
+remote_exec(session="target", command="<paste linux/first-look.sh body>")
+
+# Windows — inline
+remote_exec(session="target", command="<paste windows/first-look.ps1 body>")
+
+# macOS — inline
+remote_exec(session="target", command="<paste macos/first-look.sh body>")
+```
+
+### What to look for in first-look output
+
+| Section | Suspicious if... |
+|---------|------------------|
+| WHO IS ON | Unknown users, root sessions from unexpected IPs, multiple concurrent sessions |
+| TOP PROCESSES | Binaries in /tmp, /dev/shm, C:\Users\Public; crypto miners (high CPU); python/perl/bash with network |
+| ACTIVE CONNECTIONS | Outbound to ports 4444/8080/6667/31337; external IPs from internal host; many ESTABLISHED |
+| STAGING AREAS | Any executables, scripts, or large files in temp directories |
+| RECENT FILES | Modified system binaries, new authorized_keys, changed configs |
+| SCHEDULED EXECUTION | Cron/task with curl/wget/base64/powershell, paths to /tmp or C:\Users\Public |
+| SECURITY STATE | Disabled AV/firewall, SIP disabled, exclusion paths added |
+
+### After first-look
+
+- **Nothing suspicious**: Likely not actively compromised, proceed to targeted gather if needed
+- **Active attacker connections**: Consider immediate containment (kill process, block IP)
+- **Persistence found**: Run full persistence playbook before eradication
+- **Staging files found**: Collect/hash them for evidence before removal
 
 ## Execution Methods
 

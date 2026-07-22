@@ -24,6 +24,8 @@
  *   remote_disconnect  — Close a specific session or all sessions
  *   remote_tunnel      — Create SSH port forward (local, remote, or dynamic SOCKS)
  *   remote_tunnel_close — Close a specific tunnel or all tunnels
+ *   remote_relay       — Set up a TCP relay on a pivot host using native tools
+ *   remote_relay_close — Tear down a relay on a pivot host
  *
  * Slash commands:
  *   /remote-connect ssh user@host --name pivot01
@@ -62,7 +64,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
-import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget } from "./lib/remote-session-core.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 
@@ -117,6 +119,17 @@ interface TunnelInfo {
   description: string;
 }
 
+interface RelayInfo {
+  id: string;
+  session: string;
+  method: RelayMethod;
+  listenPort: number;
+  targetHost: string;
+  targetPort: number;
+  createdAt: Date;
+  description: string;
+}
+
 // -------------------------------------------------------------------
 // Marker for command boundary detection
 // -------------------------------------------------------------------
@@ -137,10 +150,12 @@ function generateId(prefix = "cmd"): string {
 
 const sessions = new Map<string, RemoteSession>();
 const activeTunnels: TunnelInfo[] = [];
+const activeRelays: RelayInfo[] = [];
 let tunnelCounter = 0;
+let relayCounter = 0;
 let defaultSessionName: string | null = null;
 
-const LOG_DIR = join(process.env.BRJOTSKEL_LOG_DIR || join(process.cwd(), "logs"), "remote-sessions");
+const LOG_DIR = join(process.cwd(), "logs", "remote-sessions");
 const COMMAND_TIMEOUT_MS = 60_000;
 
 
@@ -827,10 +842,10 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
       const lines: string[] = [];
 
-      if (sessions.size === 0 && activeTunnels.length === 0) {
+      if (sessions.size === 0 && activeTunnels.length === 0 && activeRelays.length === 0) {
         return {
-          content: [{ type: "text", text: "No active sessions or tunnels." }],
-          details: { sessions: 0, tunnels: 0 },
+          content: [{ type: "text", text: "No active sessions, tunnels, or relays." }],
+          details: { sessions: 0, tunnels: 0, relays: 0 },
         };
       }
 
@@ -871,9 +886,22 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      if (activeRelays.length > 0) {
+        lines.push(`=== Active Relays (${activeRelays.length}) ===`);
+        lines.push("");
+        for (const r of activeRelays) {
+          const sessionAlive = sessions.has(r.session) && !sessions.get(r.session)!.process.killed;
+          const duration = Math.round((Date.now() - r.createdAt.getTime()) / 1000);
+          const status = sessionAlive ? "✓" : "⚠";
+          lines.push(`  ${status} [${r.id}] ${r.method.toUpperCase()} | ${r.session}:${r.listenPort} → ${r.targetHost}:${r.targetPort} | ${duration}s`);
+          lines.push(`    ${r.description}`);
+          lines.push("");
+        }
+      }
+
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        details: { sessions: sessions.size, tunnels: activeTunnels.length, default: defaultSessionName },
+        details: { sessions: sessions.size, tunnels: activeTunnels.length, relays: activeRelays.length, default: defaultSessionName },
       };
     },
   });
@@ -1161,6 +1189,211 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------
+  // Tool: remote_relay
+  // -------------------------------------------------------------------
+  pi.registerTool({
+    name: "remote_relay",
+    label: "Remote Relay",
+    description: "Set up a TCP port relay on a compromised pivot host using native tools (socat, ncat, nc, netsh portproxy, or bash /dev/tcp). Use when SSH tunneling is unavailable or the next target is only reachable from the pivot. Automatically detects available relay methods on the pivot host.",
+    promptSnippet: "Create a TCP relay on a pivot host to reach systems the harness cannot directly access",
+    promptGuidelines: [
+      "Use remote_relay when the harness cannot reach the target directly but an existing session can.",
+      "remote_relay auto-detects available tools (socat, ncat, nc, netsh) on the pivot host.",
+      "After relay is set up, connect through the pivot host's listen port (e.g., SSH to pivot:listen_port to reach internal:22).",
+      "Use remote_relay_close to tear down relays when no longer needed.",
+      "For SSH-capable pivots, prefer remote_tunnel instead — it's more reliable.",
+    ],
+    parameters: Type.Object({
+      session: Type.String({ description: "Session name of the pivot host where the relay will run" }),
+      target_host: Type.String({ description: "Target host reachable from the pivot (e.g., '10.10.20.5')" }),
+      target_port: Type.Number({ description: "Target port on the remote host (e.g., 22, 445, 3389)" }),
+      listen_port: Type.Number({ description: "Port to listen on the pivot host (e.g., 4422)" }),
+      method: Type.Optional(StringEnum(["socat", "ncat", "nc-openbsd", "nc-traditional", "bash-devtcp", "netsh-portproxy", "auto"] as const)),
+      listen_address: Type.Optional(Type.String({ description: "Bind address on pivot (default: 0.0.0.0)" })),
+      description: Type.Optional(Type.String({ description: "Human description of this relay" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const session = getSession(params.session);
+
+      if (!session.process || session.process.killed) {
+        sessions.delete(session.info.name);
+        throw new Error(`Session '${session.info.name}' has been disconnected.`);
+      }
+
+      let method: RelayMethod;
+
+      if (!params.method || params.method === "auto") {
+        // Probe for available tools
+        const probeCmd = buildRelayProbeCommand(session.info.platform);
+        const probeOutput = await execCommand(session, probeCmd, 10_000);
+        const available = detectRelayMethods(probeOutput, session.info.platform);
+
+        if (available.length === 0) {
+          throw new Error(`No relay tools detected on '${session.info.name}' (${session.info.platform}). Probe output:\n${probeOutput}\n\nTry specifying method manually or upload a relay binary.`);
+        }
+        method = available[0];
+      } else {
+        method = params.method as RelayMethod;
+      }
+
+      const spec: RelaySpec = {
+        method,
+        listenPort: params.listen_port,
+        targetHost: params.target_host,
+        targetPort: params.target_port,
+        listenAddress: params.listen_address,
+      };
+
+      // Confirm with operator
+      if (ctx.hasUI) {
+        const confirmed = await ctx.ui.confirm(
+          "Create Relay",
+          `Set up ${method} relay on '${session.info.name}':\n${session.info.target}:${params.listen_port} → ${params.target_host}:${params.target_port}`,
+        );
+        if (!confirmed) {
+          throw new Error("Relay creation cancelled by operator");
+        }
+      }
+
+      // Execute the relay command
+      const relayCmd = buildRelayCommand(spec);
+      logToSession(session.info.name, ">>>", `[RELAY SETUP] ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}`);
+      const output = await execCommand(session, relayCmd, 10_000);
+
+      // Verify it's listening
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const verifyCmd = buildRelayVerifyCommand(spec);
+      const verifyOutput = await execCommand(session, verifyCmd, 10_000);
+
+      const listening = verifyOutput.includes(String(params.listen_port));
+
+      relayCounter++;
+      const relayId = `relay-${relayCounter}`;
+      const description = params.description || `${method} relay on ${session.info.name}: :${params.listen_port} → ${params.target_host}:${params.target_port}`;
+
+      activeRelays.push({
+        id: relayId,
+        session: session.info.name,
+        method,
+        listenPort: params.listen_port,
+        targetHost: params.target_host,
+        targetPort: params.target_port,
+        createdAt: new Date(),
+        description,
+      });
+
+      logToSession(session.info.name, "---", `[RELAY CREATED] ${relayId}: ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}`);
+
+      const pivotTarget = session.info.target.includes("@") ? session.info.target.split("@")[1] : session.info.target;
+      const pivotHost = pivotTarget.split(":")[0];
+
+      const usageLines = [
+        `Relay created: ${relayId}`,
+        `Method: ${method}`,
+        `Path: ${session.info.name} (${pivotHost}):${params.listen_port} → ${params.target_host}:${params.target_port}`,
+        `Verified listening: ${listening ? "yes" : "UNCONFIRMED — check manually"}`,
+        "",
+        "Usage from harness:",
+      ];
+
+      if (params.target_port === 22) {
+        usageLines.push(`  ssh user@${pivotHost} -p ${params.listen_port}`);
+        usageLines.push(`  remote_connect(protocol="ssh", target="user@${pivotHost}", port=${params.listen_port}, name="next-hop")`);
+      } else if (params.target_port === 445) {
+        usageLines.push(`  netexec smb ${pivotHost} --port ${params.listen_port} -u <user> -H <hash>`);
+        usageLines.push(`  smbclient -p ${params.listen_port} //${pivotHost}/share -U <user>`);
+      } else if (params.target_port === 5985 || params.target_port === 5986) {
+        usageLines.push(`  remote_connect(protocol="winrm", target="user@${pivotHost}", port=${params.listen_port}, name="next-hop")`);
+      } else if (params.target_port === 3389) {
+        usageLines.push(`  xfreerdp /v:${pivotHost}:${params.listen_port} /u:<user> /p:<pass>`);
+      } else {
+        usageLines.push(`  Connect to ${pivotHost}:${params.listen_port} to reach ${params.target_host}:${params.target_port}`);
+      }
+
+      usageLines.push("");
+      usageLines.push(`Cleanup: remote_relay_close(id="${relayId}")`);
+
+      if (!listening) {
+        usageLines.push("");
+        usageLines.push(`⚠ Verify output:\n${verifyOutput}`);
+        if (output) usageLines.push(`Relay command output:\n${output}`);
+      }
+
+      return {
+        content: [{ type: "text", text: usageLines.join("\n") }],
+        details: { relay: { id: relayId, method, session: session.info.name, listenPort: params.listen_port, target: `${params.target_host}:${params.target_port}` } },
+      };
+    },
+  });
+
+  // -------------------------------------------------------------------
+  // Tool: remote_relay_close
+  // -------------------------------------------------------------------
+  pi.registerTool({
+    name: "remote_relay_close",
+    label: "Remote Relay Close",
+    description: "Tear down a relay running on a pivot host. Sends the appropriate kill/cleanup command to the session where the relay was created.",
+    promptSnippet: "Close a TCP relay on a pivot host",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "Relay ID (e.g., 'relay-1'). Omit to close all relays." })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (activeRelays.length === 0) {
+        return {
+          content: [{ type: "text", text: "No active relays." }],
+          details: { closed: 0 },
+        };
+      }
+
+      let closed = 0;
+      const results: string[] = [];
+
+      const toClose = params.id
+        ? activeRelays.filter(r => r.id === params.id)
+        : [...activeRelays];
+
+      if (params.id && toClose.length === 0) {
+        const available = activeRelays.map(r => r.id).join(", ");
+        throw new Error(`Relay '${params.id}' not found. Available: ${available}`);
+      }
+
+      for (const relay of toClose) {
+        const session = sessions.get(relay.session);
+        const spec: RelaySpec = {
+          method: relay.method,
+          listenPort: relay.listenPort,
+          targetHost: relay.targetHost,
+          targetPort: relay.targetPort,
+        };
+
+        if (session && !session.process.killed) {
+          const cleanupCmd = buildRelayCleanupCommand(spec);
+          try {
+            const output = await execCommand(session, cleanupCmd, 10_000);
+            results.push(`${relay.id}: closed (${output.trim()})`);
+          } catch {
+            results.push(`${relay.id}: cleanup command failed (session may be dead)`);
+          }
+        } else {
+          results.push(`${relay.id}: session '${relay.session}' unavailable — relay may still be running on host`);
+        }
+
+        logToSession(relay.session, "---", `[RELAY CLOSED] ${relay.id}`);
+        const idx = activeRelays.findIndex(r => r.id === relay.id);
+        if (idx !== -1) activeRelays.splice(idx, 1);
+        closed++;
+      }
+
+      return {
+        content: [{ type: "text", text: `Closed ${closed} relay(s). ${activeRelays.length} remaining.\n${results.join("\n")}` }],
+        details: { closed, remaining: activeRelays.length },
+      };
+    },
+  });
+
+  // -------------------------------------------------------------------
   // Slash Commands
   // -------------------------------------------------------------------
   pi.registerCommand("remote-connect", {
@@ -1216,10 +1449,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("sessions", {
-    description: "List active remote sessions",
+    description: "List active remote sessions, tunnels, and relays",
     handler: async (_args, ctx) => {
-      if (sessions.size === 0 && activeTunnels.length === 0) {
-        ctx.ui.notify("No active sessions or tunnels", "info");
+      if (sessions.size === 0 && activeTunnels.length === 0 && activeRelays.length === 0) {
+        ctx.ui.notify("No active sessions, tunnels, or relays", "info");
         return;
       }
       const lines: string[] = [];
@@ -1233,6 +1466,13 @@ export default function (pi: ExtensionAPI) {
         for (const t of activeTunnels) {
           const alive = !t.process.killed && t.process.exitCode === null;
           lines.push(`${alive ? "✓" : "✗"} [${t.id}] ${t.type} localhost:${t.localPort} via ${t.via}`);
+        }
+      }
+      if (activeRelays.length > 0) {
+        lines.push("");
+        for (const r of activeRelays) {
+          const sessionAlive = sessions.has(r.session) && !sessions.get(r.session)!.process.killed;
+          lines.push(`${sessionAlive ? "✓" : "⚠"} [${r.id}] ${r.method} ${r.session}:${r.listenPort} → ${r.targetHost}:${r.targetPort}`);
         }
       }
       ctx.ui.notify(lines.join("\n"), "info");
@@ -1273,5 +1513,12 @@ export default function (pi: ExtensionAPI) {
       killTrackedProcess(tunnel.process);
     }
     activeTunnels.length = 0;
+
+    // Note: relays are processes on remote hosts — they persist after harness shutdown.
+    // Log them so the operator knows cleanup is needed.
+    for (const relay of activeRelays) {
+      logToSession(relay.session, "---", `[RELAY ORPHANED — pi shutdown] ${relay.id}: ${relay.method} :${relay.listenPort} → ${relay.targetHost}:${relay.targetPort}`);
+    }
+    activeRelays.length = 0;
   });
 }
