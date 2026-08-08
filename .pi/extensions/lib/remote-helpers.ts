@@ -6,7 +6,7 @@ export function psSingleQuote(value: string): string {
 }
 
 export function shellSingleQuote(value: string): string {
-  return value.replace(/'/g, `"'"'`);
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 export function detectSshShell(buffer: string, platformHint?: Platform, shellHint?: ShellFamily): { platform: Platform; shellFamily: ShellFamily } | null {

@@ -41,7 +41,7 @@ export function buildMarkerCommand(shellFamily: ShellFamily, command: string, ma
     ? `${command}\nWrite-Host '${psSingleQuote(marker)}'`
     : shellFamily === "cmd"
       ? `${command}\r\necho ${marker}`
-      : `${command}\necho '${shellSingleQuote(marker)}'`;
+      : `${command}\necho ${shellSingleQuote(marker)}`;
 }
 
 export function buildTunnelSpec(type: TunnelType, localPort: number, remoteHost?: string, remotePort?: number): { forwardSpec: string; sshArgs: string[] } {
@@ -87,7 +87,7 @@ export function buildTunnelUsageHint(type: TunnelType, via: string, localPort: n
 // Relay helpers
 // -------------------------------------------------------------------
 
-export type RelayMethod = "ncat" | "socat" | "nc-openbsd" | "nc-traditional" | "bash-devtcp" | "netsh-portproxy";
+export type RelayMethod = "ncat" | "socat" | "nc-openbsd" | "nc-traditional" | "netsh-portproxy";
 
 export interface RelaySpec {
   method: RelayMethod;
@@ -95,6 +95,37 @@ export interface RelaySpec {
   targetHost: string;
   targetPort: number;
   listenAddress?: string;
+}
+
+const SAFE_RELAY_HOST_RE = /^[A-Za-z0-9_.:-]+$/;
+const RELAY_METHODS = new Set<RelayMethod>(["ncat", "socat", "nc-openbsd", "nc-traditional", "netsh-portproxy"]);
+
+export function validateRelayPort(port: number, fieldName = "port"): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${fieldName} must be an integer from 1 to 65535.`);
+  }
+}
+
+export function validateRelayHost(value: string | undefined, fieldName: string): void {
+  if (!value) throw new Error(`${fieldName} is required.`);
+  if (value.length > 255) throw new Error(`${fieldName} is too long.`);
+  if (value.startsWith("-")) throw new Error(`${fieldName} must not start with '-'.`);
+  if (!SAFE_RELAY_HOST_RE.test(value)) {
+    throw new Error(`${fieldName} contains unsafe characters. Use only hostnames or IP addresses.`);
+  }
+}
+
+export function validateRelaySpec(spec: RelaySpec): void {
+  if (!RELAY_METHODS.has(spec.method)) throw new Error(`Unsupported relay method: ${String(spec.method)}`);
+  validateRelayPort(spec.listenPort, "listen_port");
+  validateRelayPort(spec.targetPort, "target_port");
+  validateRelayHost(spec.targetHost, "target_host");
+  if (spec.listenAddress) validateRelayHost(spec.listenAddress, "listen_address");
+}
+
+function hasCommand(probeOutput: string, command: string): boolean {
+  const re = new RegExp(`(^|[\\s/])${command}($|[\\s:])`, "i");
+  return re.test(probeOutput);
 }
 
 /**
@@ -108,18 +139,16 @@ export function detectRelayMethods(probeOutput: string, platform: string): Relay
   if (platform === "windows") {
     // netsh is always available on Windows
     methods.push("netsh-portproxy");
-    if (out.includes("ncat")) methods.push("ncat");
+    if (hasCommand(probeOutput, "ncat")) methods.push("ncat");
     return methods;
   }
 
   // Unix/Linux/macOS priority order
-  if (out.includes("socat")) methods.push("socat");
-  if (out.includes("ncat")) methods.push("ncat");
-  // nc detection: check flavor
+  if (hasCommand(probeOutput, "socat")) methods.push("socat");
+  if (hasCommand(probeOutput, "ncat")) methods.push("ncat");
+  // nc detection: check flavor. Do not treat "ncat" as "nc".
   if (out.includes("openbsd") || out.includes("netcat-openbsd")) methods.push("nc-openbsd");
-  else if (out.includes("nc") || out.includes("netcat")) methods.push("nc-traditional");
-  // bash /dev/tcp is always a fallback on bash hosts
-  if (out.includes("bash") || out.includes("/bin/bash")) methods.push("bash-devtcp");
+  else if (hasCommand(probeOutput, "nc") || hasCommand(probeOutput, "netcat")) methods.push("nc-traditional");
 
   return methods;
 }
@@ -128,6 +157,7 @@ export function detectRelayMethods(probeOutput: string, platform: string): Relay
  * Build the relay command string for a given method and spec.
  */
 export function buildRelayCommand(spec: RelaySpec): string {
+  validateRelaySpec(spec);
   const { method, listenPort, targetHost, targetPort, listenAddress } = spec;
   const bindAddr = listenAddress || "0.0.0.0";
 
@@ -145,12 +175,11 @@ export function buildRelayCommand(spec: RelaySpec): string {
     case "nc-traditional":
       return `rm -f /tmp/.r${listenPort} && mkfifo /tmp/.r${listenPort} && (nc -l -p ${listenPort} < /tmp/.r${listenPort} | nc ${targetHost} ${targetPort} > /tmp/.r${listenPort} &)`;
 
-    case "bash-devtcp":
-      // Pure bash relay using /dev/tcp — single connection only
-      return `(bash -c 'exec 3<>/dev/tcp/${targetHost}/${targetPort}; cat <&3 & cat >/dev/null <&0 >&3; kill %1 2>/dev/null' < <(nc -l ${bindAddr} ${listenPort}) &)`;
-
     case "netsh-portproxy":
       return `netsh interface portproxy add v4tov4 listenport=${listenPort} listenaddress=${bindAddr} connectport=${targetPort} connectaddress=${targetHost}`;
+
+    default:
+      throw new Error(`Unsupported relay method: ${String(method)}`);
   }
 }
 
@@ -158,6 +187,7 @@ export function buildRelayCommand(spec: RelaySpec): string {
  * Build the cleanup command to tear down a relay.
  */
 export function buildRelayCleanupCommand(spec: RelaySpec): string {
+  validateRelaySpec(spec);
   const { method, listenPort, listenAddress } = spec;
   const bindAddr = listenAddress || "0.0.0.0";
 
@@ -172,11 +202,11 @@ export function buildRelayCleanupCommand(spec: RelaySpec): string {
     case "nc-traditional":
       return `pkill -f 'nc -l.*${listenPort}' 2>/dev/null; rm -f /tmp/.r${listenPort}; echo 'relay stopped'`;
 
-    case "bash-devtcp":
-      return `pkill -f 'nc -l.*${listenPort}' 2>/dev/null; echo 'relay stopped'`;
-
     case "netsh-portproxy":
       return `netsh interface portproxy delete v4tov4 listenport=${listenPort} listenaddress=${bindAddr}`;
+
+    default:
+      throw new Error(`Unsupported relay method: ${String(method)}`);
   }
 }
 
@@ -187,13 +217,14 @@ export function buildRelayProbeCommand(platform: string): string {
   if (platform === "windows") {
     return `Write-Output 'netsh'; if (Get-Command ncat -ErrorAction SilentlyContinue) { Write-Output 'ncat' }`;
   }
-  return `which socat ncat nc netcat bash 2>/dev/null; nc -h 2>&1 | head -3; file /bin/nc 2>/dev/null`;
+  return `which socat ncat nc netcat 2>/dev/null; nc -h 2>&1 | head -3; file /bin/nc 2>/dev/null`;
 }
 
 /**
  * Build a verification command to check if the relay is listening.
  */
 export function buildRelayVerifyCommand(spec: RelaySpec): string {
+  validateRelaySpec(spec);
   if (spec.method === "netsh-portproxy") {
     return `netsh interface portproxy show v4tov4`;
   }

@@ -64,7 +64,8 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
-import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
+import { parseShortcutArgs, formatLandShortcut, formatAssessShortcut, formatPursueShortcut, formatContainShortcut, formatEradicateShortcut, formatVerifyShortcut, buildAssessPrompt, buildPursuePrompt, buildContainPrompt, buildEradicatePrompt, buildVerifyPrompt, type OperatorSessionSummary } from "./lib/operator-shortcuts.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 
@@ -126,6 +127,7 @@ interface RelayInfo {
   listenPort: number;
   targetHost: string;
   targetPort: number;
+  listenAddress?: string;
   createdAt: Date;
   description: string;
 }
@@ -813,9 +815,10 @@ export default function (pi: ExtensionAPI) {
       } else {
         // Unix: heredoc
         const escapedPath = shellSingleQuote(params.remote_path);
-        writeCmd = `cat > '${escapedPath}' << '${delimiter}'\n${params.content}\n${delimiter}`;
+        const escapedDelimiter = shellSingleQuote(delimiter);
+        writeCmd = `cat > ${escapedPath} << ${escapedDelimiter}\n${params.content}\n${delimiter}`;
         if (params.executable) {
-          writeCmd += `\nchmod +x '${escapedPath}'`;
+          writeCmd += `\nchmod +x ${escapedPath}`;
         }
       }
 
@@ -1194,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "remote_relay",
     label: "Remote Relay",
-    description: "Set up a TCP port relay on a compromised pivot host using native tools (socat, ncat, nc, netsh portproxy, or bash /dev/tcp). Use when SSH tunneling is unavailable or the next target is only reachable from the pivot. Automatically detects available relay methods on the pivot host.",
+    description: "Set up a TCP port relay on a compromised pivot host using native tools (socat, ncat, nc, or netsh portproxy). Use when SSH tunneling is unavailable or the next target is only reachable from the pivot. Automatically detects available relay methods on the pivot host.",
     promptSnippet: "Create a TCP relay on a pivot host to reach systems the harness cannot directly access",
     promptGuidelines: [
       "Use remote_relay when the harness cannot reach the target directly but an existing session can.",
@@ -1208,7 +1211,7 @@ export default function (pi: ExtensionAPI) {
       target_host: Type.String({ description: "Target host reachable from the pivot (e.g., '10.10.20.5')" }),
       target_port: Type.Number({ description: "Target port on the remote host (e.g., 22, 445, 3389)" }),
       listen_port: Type.Number({ description: "Port to listen on the pivot host (e.g., 4422)" }),
-      method: Type.Optional(StringEnum(["socat", "ncat", "nc-openbsd", "nc-traditional", "bash-devtcp", "netsh-portproxy", "auto"] as const)),
+      method: Type.Optional(StringEnum(["socat", "ncat", "nc-openbsd", "nc-traditional", "netsh-portproxy", "auto"] as const)),
       listen_address: Type.Optional(Type.String({ description: "Bind address on pivot (default: 0.0.0.0)" })),
       description: Type.Optional(Type.String({ description: "Human description of this relay" })),
     }),
@@ -1230,7 +1233,7 @@ export default function (pi: ExtensionAPI) {
         const available = detectRelayMethods(probeOutput, session.info.platform);
 
         if (available.length === 0) {
-          throw new Error(`No relay tools detected on '${session.info.name}' (${session.info.platform}). Probe output:\n${probeOutput}\n\nTry specifying method manually or upload a relay binary.`);
+          throw new Error(`No relay tools detected on '${session.info.name}' (${session.info.platform}). Probe output:\n${probeOutput}\n\nTry specifying method manually or use remote_tunnel through an SSH-capable pivot.`);
         }
         method = available[0];
       } else {
@@ -1244,6 +1247,7 @@ export default function (pi: ExtensionAPI) {
         targetPort: params.target_port,
         listenAddress: params.listen_address,
       };
+      validateRelaySpec(spec);
 
       // Confirm with operator
       if (ctx.hasUI) {
@@ -1268,6 +1272,18 @@ export default function (pi: ExtensionAPI) {
 
       const listening = verifyOutput.includes(String(params.listen_port));
 
+      if (!listening) {
+        let cleanupNote = "cleanup not run";
+        try {
+          const cleanupOutput = await execCommand(session, buildRelayCleanupCommand(spec), 10_000);
+          cleanupNote = cleanupOutput.trim() || "cleanup command sent";
+        } catch (err: any) {
+          cleanupNote = `cleanup failed: ${err.message}`;
+        }
+        logToSession(session.info.name, "---", `[RELAY SETUP FAILED] ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}; ${cleanupNote}`);
+        throw new Error(`Relay setup was not verified as listening on port ${params.listen_port}; cleanup attempted.\nVerify output:\n${verifyOutput}\nCleanup: ${cleanupNote}${output ? `\nRelay command output:\n${output}` : ""}`);
+      }
+
       relayCounter++;
       const relayId = `relay-${relayCounter}`;
       const description = params.description || `${method} relay on ${session.info.name}: :${params.listen_port} → ${params.target_host}:${params.target_port}`;
@@ -1279,6 +1295,7 @@ export default function (pi: ExtensionAPI) {
         listenPort: params.listen_port,
         targetHost: params.target_host,
         targetPort: params.target_port,
+        listenAddress: params.listen_address,
         createdAt: new Date(),
         description,
       });
@@ -1366,6 +1383,7 @@ export default function (pi: ExtensionAPI) {
           listenPort: relay.listenPort,
           targetHost: relay.targetHost,
           targetPort: relay.targetPort,
+          listenAddress: relay.listenAddress,
         };
 
         if (session && !session.process.killed) {
@@ -1396,6 +1414,103 @@ export default function (pi: ExtensionAPI) {
   // -------------------------------------------------------------------
   // Slash Commands
   // -------------------------------------------------------------------
+
+  function operatorSessions(): OperatorSessionSummary[] {
+    return [...sessions.values()].map(session => ({
+      name: session.info.name,
+      protocol: session.info.protocol,
+      target: session.info.target,
+      platform: session.info.platform,
+      commandCount: session.info.commandCount,
+    }));
+  }
+
+  function pickOperatorSession(args?: string): OperatorSessionSummary | undefined {
+    const parsed = parseShortcutArgs(args);
+    const available = operatorSessions();
+    const selectedName = parsed.sessionName || (defaultSessionName && sessions.has(defaultSessionName) ? defaultSessionName : (available.length === 1 ? available[0].name : undefined));
+    return selectedName ? available.find(s => s.name === selectedName) : undefined;
+  }
+
+  function sessionCompletions(prefix: string) {
+    const base = [...sessions.keys()].map(name => ({ value: name, label: name, description: "active remote session" }));
+    if (!prefix) return base;
+    return base.filter(item => item.value.startsWith(prefix));
+  }
+
+  function showOrStage(ctx: any, shouldStage: boolean, promptText: string | undefined, displayText: string): void {
+    if (shouldStage && promptText) {
+      ctx.ui.setEditorText(promptText);
+      ctx.ui.notify("Staged phase prompt in editor. Press Enter to run or edit first.", "info");
+      return;
+    }
+    ctx.ui.notify(displayText, "info");
+  }
+
+  pi.registerCommand("land", {
+    description: "Operator shortcut: landing/access primitives and immediate next action",
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      if (parsed.help) {
+        ctx.ui.notify("Usage: /land\nShows fast access, pivot, and post-landing prompts. No case/report workflow.", "info");
+        return;
+      }
+      ctx.ui.notify(formatLandShortcut(operatorSessions()), "info");
+    },
+  });
+
+  pi.registerCommand("assess", {
+    description: "Operator shortcut: first-look and high-signal assessment commands for a session",
+    getArgumentCompletions: sessionCompletions,
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      const session = pickOperatorSession(args);
+      const display = formatAssessShortcut(session, operatorSessions());
+      showOrStage(ctx, parsed.prompt, session ? buildAssessPrompt(session) : undefined, display);
+    },
+  });
+
+  pi.registerCommand("pursue", {
+    description: "Operator shortcut: credential/pivot chase board commands",
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      showOrStage(ctx, parsed.prompt, buildPursuePrompt(), formatPursueShortcut(operatorSessions()));
+    },
+  });
+
+  pi.registerCommand("contain", {
+    description: "Operator shortcut: evidence-first containment command pack for a session",
+    getArgumentCompletions: sessionCompletions,
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      const session = pickOperatorSession(args);
+      const display = formatContainShortcut(session, operatorSessions());
+      showOrStage(ctx, parsed.prompt, session ? buildContainPrompt(session) : undefined, display);
+    },
+  });
+
+  pi.registerCommand("eradicate", {
+    description: "Operator shortcut: evidence-backed eradication command pack for a session",
+    getArgumentCompletions: sessionCompletions,
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      const session = pickOperatorSession(args);
+      const display = formatEradicateShortcut(session, operatorSessions());
+      showOrStage(ctx, parsed.prompt, session ? buildEradicatePrompt(session) : undefined, display);
+    },
+  });
+
+  pi.registerCommand("verify", {
+    description: "Operator shortcut: post-containment/eradication verification commands for a session",
+    getArgumentCompletions: sessionCompletions,
+    handler: async (args, ctx) => {
+      const parsed = parseShortcutArgs(args);
+      const session = pickOperatorSession(args);
+      const display = formatVerifyShortcut(session, operatorSessions());
+      showOrStage(ctx, parsed.prompt, session ? buildVerifyPrompt(session) : undefined, display);
+    },
+  });
+
   pi.registerCommand("remote-connect", {
     description: "Preview connection arguments; use the remote_connect tool for the actual connection",
     handler: async (args, ctx) => {

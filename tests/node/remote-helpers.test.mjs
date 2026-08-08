@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 
 import {
   psSingleQuote,
@@ -10,7 +11,11 @@ import {
 
 test('quote helpers escape apostrophes for powershell and posix shells', () => {
   assert.equal(psSingleQuote("o'hare"), "o''hare");
-  assert.equal(shellSingleQuote("o'hare"), "o\"'\"'hare");
+  assert.equal(shellSingleQuote("o'hare"), "'o'\\''hare'");
+
+  const original = "path with spaces/o'hare";
+  const roundTrip = execFileSync('bash', ['-lc', `printf %s ${shellSingleQuote(original)}`], { encoding: 'utf8' });
+  assert.equal(roundTrip, original);
 });
 
 test('detectSshShell identifies posix, powershell, cmd, and hinted network devices', () => {

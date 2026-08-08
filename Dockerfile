@@ -61,11 +61,15 @@ RUN chmod +x /usr/local/bin/ir-log /usr/local/bin/intel-snippet
 COPY CONSTITUTION.md README.md /opt/brjotskel/
 COPY docs/ /opt/brjotskel/docs/
 
-# --- pi skill & extension (inside container) ---
-COPY .pi/ /opt/brjotskel/.pi/
+# --- pi skills & extensions (inside container) ---
+# Copy only tracked pi configuration. Do not copy .pi/npm local cache/node_modules.
+RUN mkdir -p /opt/brjotskel/.pi /opt/brjotskel/.pi/prompts /opt/brjotskel/.pi/npm
+COPY .pi/settings.json /opt/brjotskel/.pi/settings.json
+COPY .pi/extensions/ /opt/brjotskel/.pi/extensions/
+COPY .pi/skills/ /opt/brjotskel/.pi/skills/
 COPY .config/nvim/ /etc/xdg/nvim/
 
-RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /workspace \
+RUN mkdir -p /opt/brjotskel/logs /opt/brjotskel/logs/remote-sessions /opt/brjotskel/workspace /workspace \
     && cd /opt/brjotskel \
     && pi install -l --approve npm:pi-smart-fetch
 

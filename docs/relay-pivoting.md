@@ -24,7 +24,8 @@ When `method="auto"` (default), the tool probes the pivot host for available too
 2. `ncat` — reliable, handles `--sh-exec` for bidirectional relay
 3. `nc` (OpenBSD) — works but requires fifo hack for bidirectional
 4. `nc` (traditional) — same as OpenBSD variant with `-p` syntax
-5. `bash /dev/tcp` — last resort, single connection only
+
+`bash /dev/tcp` is intentionally not auto-selected because the previous implementation was not a reliable bidirectional relay.
 
 **Priority order (Windows):**
 1. `netsh portproxy` — always available, persistent across reboots
@@ -138,15 +139,6 @@ netsh interface portproxy add v4tov4 listenport=4422 listenaddress=0.0.0.0 conne
 - ⚠️ Survives reboot — must explicitly clean up
 - ⚠️ Requires admin privileges
 
-### bash /dev/tcp (last resort)
-```bash
-# Single-connection only, limited reliability
-bash -c 'exec 3<>/dev/tcp/10.10.20.5/22; cat <&3 & cat >&3'
-```
-- ❌ Single connection only
-- ❌ No fork/backgrounding easily
-- ✅ Zero dependencies beyond bash
-
 ## Decision Tree
 
 ```
@@ -164,7 +156,7 @@ Do you have a shell on an intermediate host that CAN reach the target?
 
 Can you chain? (harness → SSH pivot → relay pivot → target)
   YES → remote_tunnel to reach relay host, then remote_relay from there
-  NO → You need to find another path or introduce tooling (chisel, etc.)
+  NO → You need to find another authorized path or use an SSH-capable pivot.
 ```
 
 ## OPSEC Notes

@@ -14,6 +14,7 @@ import {
   buildRelayCleanupCommand,
   buildRelayProbeCommand,
   buildRelayVerifyCommand,
+  validateRelaySpec,
 } from '../../.pi/extensions/lib/remote-session-core.ts';
 
 test('chooseSessionName resolves default, single-session, and explicit selection', () => {
@@ -31,7 +32,7 @@ test('chooseSessionName raises clear errors for none, many, and missing sessions
 test('buildMarkerCommand emits shell-specific marker wrappers', () => {
   assert.equal(buildMarkerCommand('powershell', 'whoami', "abc'def"), "whoami\nWrite-Host 'abc''def'");
   assert.equal(buildMarkerCommand('cmd', 'dir', 'marker123'), 'dir\r\necho marker123');
-  assert.equal(buildMarkerCommand('posix', 'id', "ab'cd"), "id\necho 'ab\"'\"'cd'");
+  assert.equal(buildMarkerCommand('posix', 'id', "ab'cd"), "id\necho 'ab'\\''cd'");
 });
 
 test('buildTunnelSpec, description, and usage hint format each tunnel type', () => {
@@ -110,7 +111,12 @@ test('detectRelayMethods identifies tools from probe output (Linux)', () => {
   assert.equal(methods[0], 'socat');
   assert.ok(methods.includes('ncat'));
   assert.ok(methods.includes('nc-openbsd'));
-  assert.ok(methods.includes('bash-devtcp'));
+  assert.ok(!methods.includes('bash-devtcp'));
+});
+
+test('detectRelayMethods does not treat ncat as nc', () => {
+  const methods = detectRelayMethods('/usr/bin/ncat\n', 'linux');
+  assert.deepEqual(methods, ['ncat']);
 });
 
 test('detectRelayMethods returns netsh-portproxy for Windows', () => {
@@ -123,6 +129,17 @@ test('detectRelayMethods returns netsh-portproxy for Windows', () => {
 test('detectRelayMethods returns empty array when nothing found', () => {
   const methods = detectRelayMethods('', 'linux');
   assert.deepEqual(methods, []);
+});
+
+test('validateRelaySpec rejects unsafe relay input', () => {
+  const base = { method: 'socat', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 };
+
+  assert.doesNotThrow(() => validateRelaySpec(base));
+  assert.throws(() => validateRelaySpec({ ...base, listenPort: 0 }), /listen_port/);
+  assert.throws(() => validateRelaySpec({ ...base, targetPort: 65536 }), /target_port/);
+  assert.throws(() => validateRelaySpec({ ...base, targetHost: '10.10.20.5;id' }), /unsafe characters/);
+  assert.throws(() => validateRelaySpec({ ...base, listenAddress: '-oProxyCommand=sh' }), /must not start/);
+  assert.throws(() => validateRelaySpec({ ...base, method: 'bash-devtcp' }), /Unsupported relay method/);
 });
 
 test('buildRelayCommand generates correct commands for each method', () => {
@@ -148,8 +165,8 @@ test('buildRelayCleanupCommand generates correct teardown for each method', () =
   const socat = buildRelayCleanupCommand({ ...base, method: 'socat' });
   assert.match(socat, /pkill -f.*socat TCP-LISTEN:4422/);
 
-  const netsh = buildRelayCleanupCommand({ ...base, method: 'netsh-portproxy' });
-  assert.match(netsh, /netsh interface portproxy delete v4tov4 listenport=4422/);
+  const netsh = buildRelayCleanupCommand({ ...base, method: 'netsh-portproxy', listenAddress: '127.0.0.1' });
+  assert.match(netsh, /netsh interface portproxy delete v4tov4 listenport=4422 listenaddress=127\.0\.0\.1/);
 
   const nc = buildRelayCleanupCommand({ ...base, method: 'nc-openbsd' });
   assert.match(nc, /rm -f \/tmp\/.r4422/);

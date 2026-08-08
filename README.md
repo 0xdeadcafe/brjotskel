@@ -29,6 +29,7 @@ Built for defenders operating in environments without EDR: investigate active co
   - SSH local/remote port forwards and dynamic SOCKS proxies
   - **TCP relays through pivot hosts** using native tools (socat, ncat, nc, netsh portproxy)
   - Session, tunnel, and relay audit logging
+  - Senior-responder phase shortcuts: `/land`, `/assess`, `/pursue`, `/contain`, `/eradicate`, `/verify`
 - `.pi/extensions/intel-store.ts`
   - YAML-backed intel store for hosts, credentials, accounts, and pivot paths
   - Query helpers for access mapping
@@ -65,6 +66,21 @@ LAND → ASSESS → PURSUE → CONTAIN → ERADICATE → VERIFY
 
 See [docs/analyst-runbook.md](docs/analyst-runbook.md) for operational details.
 
+### Operator phase shortcuts
+
+For senior responders moving fast, phase commands are **command accelerators**, not case/report workflow gates:
+
+| Command | Purpose |
+|---------|---------|
+| `/land` | Show fast access, pivot, and immediate post-landing primitives |
+| `/assess <session>` | Show platform-specific first-look and follow-up triage playbooks |
+| `/pursue` | Show intel/credential/pivot chase-board commands |
+| `/contain <session>` | Show evidence-first containment command pack; no auto-execution |
+| `/eradicate <session>` | Show evidence-backed persistence removal workflow; no auto-execution |
+| `/verify <session>` | Show post-action verification checks |
+
+Add `--prompt` to stage an editable agent prompt instead of only displaying the shortcut, e.g. `/assess web01 --prompt`.
+
 ## Pivoting capabilities
 
 | Method | When to use |
@@ -74,7 +90,7 @@ See [docs/analyst-runbook.md](docs/analyst-runbook.md) for operational details.
 | SSH dynamic SOCKS | Route multiple tools through an SSH pivot |
 | `remote_relay` (socat/ncat) | Pivot through a Linux host without SSH tunneling |
 | `remote_relay` (netsh portproxy) | Pivot through a Windows host without OpenSSH |
-| `remote_relay` (nc/bash) | Last-resort relay using minimal native tools |
+| `remote_relay` (nc fifo) | Last-resort relay using native netcat variants |
 
 See [docs/relay-pivoting.md](docs/relay-pivoting.md) for the decision tree and chaining examples.
 

@@ -1,0 +1,32 @@
+# VCS and local metadata
+.git
+.git/**
+.github
+
+# Local secrets / operator state
+.env
+.env.*
+logs/**
+workspace/**
+intel/**
+
+# Local reference clones and scratch data
+temp/**
+
+# pi local package cache/state; image runs pi install during build
+.pi/npm/**
+
+# Dependency/cache noise
+node_modules/**
+.npm/**
+__pycache__/**
+*.pyc
+.pytest_cache/**
+.coverage
+
+# Editor / OS noise
+.vscode/**
+.idea/**
+*.swp
+.DS_Store
+*.log

@@ -26,6 +26,7 @@ When an attacker is operating inside our environment, defenders must be able to 
 - Optimize for the responder under pressure: clear errors, low setup overhead, readable logs, and sane defaults.
 - Favor workflows that work during active incidents without ceremony.
 - Make common investigative paths fast and obvious.
+- Keep hot-path response aids as accelerators, not gates: senior responders should be able to use phase shortcuts, session logs, and intel capture without mandatory case/report forms.
 
 ### Understand before changing
 - Trace the real incident workflow, host state, and likely operational impact before changing code or taking disruptive action.

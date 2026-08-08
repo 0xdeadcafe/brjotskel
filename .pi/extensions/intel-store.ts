@@ -18,7 +18,7 @@
  *   /intel           — Quick summary of intel store
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, chmodSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -31,11 +31,42 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // Paths
 // -------------------------------------------------------------------
 
+function ensurePrivateDir(dirPath: string): void {
+  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  try { chmodSync(dirPath, 0o700); } catch { /* ignore chmod failures on non-POSIX mounts */ }
+}
+
+function ensurePrivateFile(filePath: string): void {
+  try { if (existsSync(filePath)) chmodSync(filePath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
+}
+
+function hardenExistingPrivateFiles(dirPath: string, depth = 2): void {
+  if (depth < 0) return;
+  try {
+    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+      const entryPath = join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        ensurePrivateDir(entryPath);
+        hardenExistingPrivateFiles(entryPath, depth - 1);
+      } else if (entry.isFile()) {
+        ensurePrivateFile(entryPath);
+      }
+    }
+  } catch { /* ignore unreadable/private-store migration failures */ }
+}
+
 function getIntelDir(): string {
   const base = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
-  mkdirSync(base, { recursive: true });
-  mkdirSync(join(base, "keys"), { recursive: true });
-  mkdirSync(join(base, "loot"), { recursive: true });
+  const keysDir = join(base, "keys");
+  const lootDir = join(base, "loot");
+  ensurePrivateDir(base);
+  ensurePrivateDir(keysDir);
+  ensurePrivateDir(lootDir);
+  for (const fileName of ["hosts.yaml", "credentials.yaml", "accounts.yaml", "pivots.yaml", "timeline.yaml"]) {
+    ensurePrivateFile(join(base, fileName));
+  }
+  hardenExistingPrivateFiles(keysDir);
+  hardenExistingPrivateFiles(lootDir);
   return base;
 }
 
@@ -67,8 +98,10 @@ function writeYaml(filePath: string, data: any): void {
       timeout: 5000,
     });
     const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tempPath, yaml);
+    writeFileSync(tempPath, yaml, { mode: 0o600 });
+    try { chmodSync(tempPath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
     renameSync(tempPath, filePath);
+    try { chmodSync(filePath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
   } catch (err: any) {
     throw new Error(`Failed to write YAML: ${err.message}`);
   }

@@ -1,140 +1,157 @@
-# TODO — Prioritized Codebase Review
+# TODO — Deep Repo Review (2026-08-07)
 
-## Summary
+## Review snapshot
 
-**brjotskel** is a well-structured, focused IR operator harness. The core extensions (intel-store, remote-session) are solid with good test coverage and clean separation into testable library modules. The main issues are: bloat from a 1.8 GB `temp/` directory, over-engineering in `intel-snippet`, a committed `.env` with secrets, and some operational gaps.
-
----
-
-## 🔴 P0 — Fix Immediately
-
-### 1. ~~Secrets committed in `.env`~~ — FALSE ALARM
-- **File:** `.env`
-- **Status:** ✅ NOT committed. The file is correctly `.gitignore`d, never tracked, and not in git history. Local-only.
-- **Minor concern:** The file exists on disk with a real AWS token. Ensure it's not accidentally baked into Docker images (it isn't — `COPY .env` is not in the Dockerfile).
-
-### 2. ~~`temp/` directory is 1.8 GB of cloned repos~~ — INTENTIONAL
-- **Files:** `temp/metasploit-framework`, `temp/hayabusa`, `temp/hayabusa-rules`, `temp/chainsaw`
-- **Status:** ✅ Kept intentionally as local reference documentation. Already excluded by `.gitignore`.
+- Validation run: `bash bin/test` ✅ (smoke check, Python unit tests, Node helper tests all pass).
+- Tracked repo size is small (~864 KB). Local bloat/secrets live in ignored state (`temp/`, `.env`, `.pi/npm/`, `workspace/intel/`) and are now excluded from Docker build context via `.dockerignore`.
+- This replaces the prior stale review. Confirmed non-issues: `.env`, `temp/`, `workspace/intel/`, and `__pycache__/` are **not tracked** by git.
 
 ---
 
-## 🟠 P1 — Important Improvements
+## 🔴 P0 — Fix immediately
 
-### 3. `intel-snippet` is over-engineered (~350 lines of argparse boilerplate)
+### 1. ✅ Add `.dockerignore` and stop copying local pi package state into the image
+- **Files:** `Dockerfile`, missing `.dockerignore`, `.pi/npm/`, `temp/`, `.env`, `workspace/`, `logs/`
+- **Issue:** `docker build .` currently sends the entire working tree as build context, including ignored local files: `temp/` (~1.8 GB), `.pi/npm/node_modules/` (~86 MB), `.env`, logs, and `workspace/intel/`. Even though most are not copied intentionally, they are still exposed to the Docker builder/cache. Also `COPY .pi/ /opt/brjotskel/.pi/` copies ignored `.pi/npm/` into the final image when it exists locally.
+- **Action:** Add `.dockerignore` excluding `.git/`, `.env*`, `temp/`, `logs/**`, `workspace/**`, `.pi/npm/**`, `node_modules/`, caches, and pyc files. Replace broad `COPY .pi/` with explicit copies for `.pi/extensions/`, `.pi/skills/`, `.pi/settings.json`, and any required prompts.
+- **Status:** ✅ Addressed. Added `.dockerignore`; Dockerfile now copies tracked pi settings/extensions/skills explicitly and creates workspace/log dirs.
+
+### 2. ✅ Harden `remote_relay` command construction and cleanup
+- **Files:** `.pi/extensions/remote-session.ts`, `.pi/extensions/lib/remote-session-core.ts`
+- **Issues:**
+  - `buildRelayCommand()` interpolates `target_host` and `listen_address` directly into shell / `netsh` commands with no validation or quoting.
+  - Port values accept any `number`; no integer/range validation (1-65535).
+  - `RelayInfo` does not store `listenAddress`, so `remote_relay_close()` deletes Windows `netsh portproxy` rules with the default `0.0.0.0` even if the relay was created with a custom listen address.
+  - `bash-devtcp` relay is not a real bidirectional relay: target output goes to the remote shell stdout, not back to the connecting client.
+  - Relays are recorded as active even when verification says listening is unconfirmed.
+- **Action:** Validate host/address/port inputs, quote shell parameters safely, store `listenAddress` in `RelayInfo`, remove/fix `bash-devtcp`, and either fail or mark relays clearly inactive when verification fails.
+- **Status:** ✅ Addressed. Added relay spec validation, removed broken `bash-devtcp` selection, preserved custom listen addresses for cleanup, and fail/cleanup on unverified relays.
+
+### 3. ✅ Fix broken POSIX quoting helper
+- **Files:** `.pi/extensions/lib/remote-helpers.ts`, `.pi/extensions/lib/remote-session-core.ts`, `tests/node/remote-helpers.test.mjs`, `tests/node/remote-session-core.test.mjs`
+- **Issue:** `shellSingleQuote("o'hare")` returns `o"'"'hare`; callers wrap it as `'o"'"'hare'`, which is invalid shell syntax. Existing tests assert the broken form. This affects `remote_upload` paths containing apostrophes and any future command builder using this helper with user-controlled input.
+- **Action:** Replace with a standard POSIX quote helper that returns a fully quoted string, e.g. `'foo'\''bar'`, or clearly document that callers must not wrap it. Add tests that execute the generated string through `bash -n` / `printf`.
+- **Status:** ✅ Addressed. `shellSingleQuote()` now returns a complete POSIX-safe token; callers were updated; regression test round-trips through bash.
+
+### 4. ✅ Restrict permissions for intel stores containing secrets
+- **Files:** `.pi/extensions/intel-store.ts`, `workspace/intel/` runtime output
+- **Issue:** `writeYaml()` writes `credentials.yaml`, timeline, keys, and loot using the process umask. Harvested passwords, hashes, tokens, key paths, and host intel may end up group/world-readable depending on the environment.
+- **Action:** Create intel directories with `0700`; write credential/key/loot files with `0600`; consider all intel YAML sensitive by default. Add a migration/check command that warns on permissive existing files.
+- **Status:** ✅ Addressed. Intel dirs are created/chmodded `0700`; YAML temp/final files are chmodded `0600`; existing intel YAML and key/loot files are hardened opportunistically when the store is opened.
+
+---
+
+## 🟠 P1 — Important reliability / correctness work
+
+### 5. Make NetExec availability deterministic and standardize command names
+- **Files:** `Dockerfile`, `README.md`, `docs/**`, `.pi/extensions/lib/remote-session-core.ts`, `.pi/skills/shell-commands/reference/**`
+- **Issue:** Docker silently ignores NetExec install failures (`|| echo 'NetExec install skipped'`) while docs claim NetExec is included. References mix `netexec`, `crackmapexec`, and no `nxc` fallback.
+- **Action:** Fail the build if required NetExec install fails, or document it as optional. Add a smoke check for the installed command name and standardize examples (`netexec` vs `nxc`; remove stale `crackmapexec` references unless actually installed).
+
+### 6. Replace fragile YAML/string generation in `intel-snippet`
 - **File:** `bin/intel-snippet`
-- **Issue:** 14 subcommands with massive argparse definitions, each producing nearly identical YAML snippets. The custom `y()` YAML serializer reimplements PyYAML poorly (doesn't handle multiline strings, nested quoting edge cases). Most of the value is in the `source` field defaults per artifact type.
-- **Action:**
-  - Replace `y()` with `yaml.dump(data, default_flow_style=False)` (PyYAML is already a dependency).
-  - Consider collapsing to fewer subcommands with a `--template` flag, or a single generic command plus a small template registry (JSON/YAML file mapping template names to default source fields).
-  - The `compact()` helper is fine but could be a one-liner with a recursive dict comprehension.
+- **Issues:** Custom `y()` serializer can type-shift strings such as `true`, `null`, numbers, or timestamps into non-strings, and has incomplete YAML edge-case handling. The emitted `intel_add(... summary="...")` call does not escape quotes, backslashes, or newlines in `summary` / IDs / YAML triple-quote boundaries.
+- **Action:** Use PyYAML for YAML output and `json.dumps()` for Python-string-safe `category`, `id`, `data`, and `summary` arguments. Add tests for secrets like `true`, `1234`, multiline notes, quotes, and summaries with `"`.
 
-### 4. YAML parsing via `python3` subprocess in extensions
+### 7. Prevent silent intel overwrites
+- **Files:** `.pi/extensions/lib/intel-store-core.ts`, `.pi/extensions/intel-store.ts`
+- **Issue:** `intel_add` overwrites an existing entry with the same ID without warning, which can destroy provenance during an incident.
+- **Action:** Default to error on duplicate IDs. Add explicit `overwrite: true` or an `intel_update` merge tool that appends a timeline event and preserves previous source/history.
+
+### 8. Fix misleading credential timeline semantics
 - **File:** `.pi/extensions/intel-store.ts`
-- **Issue:** Every YAML read/write shells out to `python3 -c "import yaml,json..."`. This is slow (process spawn per operation), fragile (relies on python3 + pyyaml in PATH), and blocks on `execSync`.
-- **Action:** Use a JS YAML library (`yaml` npm package — it's ~50KB). Add to `.pi/npm/package.json`. This also eliminates the 5s timeout risk on large files.
+- **Issue:** `intel_get_cred` appends a `credential/confirmed` timeline entry whenever a secret is retrieved. Retrieval is not validation and can pollute the incident timeline with false confirmations.
+- **Action:** Use a distinct action such as `retrieved`/`accessed`, or log retrieval separately. Warn or refuse when credential status is `rotated`, `expired`, `revoked`, or otherwise inactive.
 
-### 5. `__pycache__` committed to repo
-- **Files:** `bin/__pycache__/`, `tests/python/__pycache__/`
-- **Issue:** Bytecode cache files checked in.
-- **Action:** Remove and add `__pycache__/` to `.gitignore` (already partially there but the files exist).
+### 9. Expand CI beyond happy-path helper tests
+- **Files:** `.github/workflows/ci.yml`, `bin/smoke-check`, `tests/**`
+- **Current gap:** CI does not build the Docker image, does not import/register the actual extension entrypoints with a mocked pi API, does not syntax-check all shell scripts, and does not parse PowerShell scripts.
+- **Action:** Add: Docker build smoke test; all tracked shell scripts `bash -n`; PowerShell parser check when `pwsh` is available; extension import/registration tests with mocked `registerTool`; regression tests for quoting, relay validation, duplicate intel IDs, malformed YAML, and inactive credentials.
 
-### 6. No error handling for intel YAML corruption
+### 10. Handle remote command timeout recovery
+- **File:** `.pi/extensions/remote-session.ts`
+- **Issue:** On timeout, `execCommand()` clears the buffer and resolves with partial output, but the remote command may still be running. The next command can interleave with stale output or execute while the previous operation is still active.
+- **Action:** Mark the session `tainted` after timeout and require reconnect, or send interrupt (`Ctrl-C`) plus drain-to-prompt before accepting another command.
+
+### 11. Replace Python subprocess YAML parsing in the intel extension
 - **File:** `.pi/extensions/intel-store.ts`
-- **Issue:** If a YAML file is malformed or partially written (e.g., crash during `writeYaml`), the extension throws with an unhelpful message. The atomic write (`tmp + rename`) is good, but reads have no recovery.
-- **Action:** Add graceful degradation: if parse fails, log warning and return empty collection rather than crashing the tool.
+- **Issue:** Every YAML read/write shells out to `python3` + PyYAML with `execSync` and a 5s timeout. This is slow, blocks the event loop, and adds a runtime dependency that tests do not exercise.
+- **Action:** Use a JS YAML library, or centralize YAML I/O with better errors. Add graceful handling for malformed/partially-written YAML (clear error with file path and recovery guidance; do not crash unrelated queries when possible).
 
 ---
 
-## 🟡 P2 — Moderate Value
+## 🟡 P2 — Moderate value / design cleanup
 
-### 7. `remote-session.ts` is a 1278-line monolith
+### 12. Strengthen intel schema validation
+- **Files:** `.pi/extensions/lib/intel-helpers.ts`, docs for intel schema
+- **Issue:** Hosts and accounts can be nearly empty; `source` is recommended in prompts but not enforced; credential types are free-form; statuses are inconsistent across docs/examples.
+- **Action:** Define category schemas with required fields, allowed status/type enums, and source requirements. Return actionable validation errors from `intel_add`.
+
+### 13. Add `intel_update` / status lifecycle operations
+- **Files:** `.pi/extensions/intel-store.ts`, `.pi/extensions/lib/intel-store-core.ts`
+- **Issue:** Operators can add and query intel, but cannot safely mark a host contained, credential rotated, pivot cleared, or append validation results without editing YAML by hand.
+- **Action:** Add `intel_update(category, id, fields, summary)` with merge semantics, status transitions, and automatic timeline entries.
+
+### 14. Support password and ProxyJump options for `remote_tunnel`
 - **File:** `.pi/extensions/remote-session.ts`
-- **Issue:** While logically sound, the extension mixes connection management, command execution, tunneling, slash commands, and all 7 tool registrations in one file. Hard to navigate.
-- **Action:** Extract connection functions (`connectSSH`, `connectWinRM`, `connectTCP`, `connectTelnet`) into `lib/remote-connections.ts`. Keep tool registrations in the main file as thin wrappers.
+- **Issue:** `remote_tunnel` supports `identity` but not password auth or ProxyJump chains, while `remote_connect` supports password and ProxyJump. Password-only pivots are common in incident response.
+- **Action:** Add `password` via `sshpass` and optional `proxy_jump` to `remote_tunnel`, matching `remote_connect` behavior.
 
-### 8. Duplicate session-alive checks
+### 15. Improve TCP/telnet target parsing and no-banner handling
 - **File:** `.pi/extensions/remote-session.ts`
-- **Issue:** `remote_exec`, `remote_upload`, and the `execCommand` function all independently check `session.process.killed` with slightly different error messages and cleanup logic.
-- **Action:** Extract a single `assertSessionAlive(session)` helper.
+- **Issue:** `target.split(":")` breaks IPv6 and ambiguous host:port strings. TCP/telnet sessions time out when a service accepts connections but sends no banner.
+- **Action:** Add a robust host/port parser and a connection-ready fallback for no-banner services, with clear best-effort warnings.
 
-### 9. No credential rotation/expiry tracking
-- **Gap:** Credentials are stored with `status: active` but there's no TTL, last-validated timestamp, or rotation tracking.
-- **Action:** Add optional `last_validated` and `expires` fields. The `intel_get_cred` tool already shows `expires` for Kerberos tickets — generalize.
+### 16. Make Docker builds reproducible and auditable
+- **File:** `Dockerfile`
+- **Issue:** Build pulls live NodeSource setup script, global pi latest, Impacket latest, and NetExec from GitHub HEAD. This is convenient but not reproducible and increases supply-chain risk.
+- **Action:** Pin versions/commits, document update cadence, and add image labels with tool versions.
 
-### 10. No `intel_update` or `intel_delete` tool
-- **Gap:** Once intel is added, there's no tool to update status (e.g., mark a credential as rotated, mark a host as contained). Operators must manually edit YAML.
-- **Action:** Add `intel_update(category, id, fields)` that merges fields into existing entries and appends a timeline event.
+### 17. Align Docker image layout with docs
+- **Files:** `Dockerfile`, `README.md`, `docs/intel-import-workflow.md`
+- **Issue:** Docker copies `ir-log` and `intel-snippet` to `/usr/local/bin`, but does not copy `bin/test` or `bin/smoke-check` into `/opt/brjotskel/bin`. Docs sometimes reference `bin/intel-snippet` as if the repo `bin/` exists inside the container.
+- **Action:** Either copy the full `bin/` directory into the image or update docs to use PATH commands inside the container and repo-relative commands outside it.
 
-### 11. Test coverage gap — no integration test for the full extension tool flow
-- **Gap:** Unit tests cover helpers well, but nothing tests `intel_add` → `intel_query` round-trip through the actual extension `execute()` methods.
-- **Action:** Add a small integration test that mocks the pi extension API and exercises the tools end-to-end against a temp directory.
+### 18. Break up the `remote-session.ts` monolith
+- **File:** `.pi/extensions/remote-session.ts`
+- **Issue:** The file is ~1,500 lines and mixes protocol connection code, command execution, upload logic, tunnels, relays, slash commands, logging, and tool registration.
+- **Action:** Extract connection adapters, upload builders, tunnel manager, relay manager, and slash-command handlers into testable modules. Keep the extension entrypoint thin.
 
 ---
 
-## 🟢 P3 — Nice to Have
+## 🟢 P3 — Cleanup / bloat / consistency
 
-### 12. `.config/nvim/` adds container weight for marginal value
-- **Files:** `.config/nvim/init.lua`, syntax files
-- **Issue:** Neovim config is baked into the container for syntax highlighting, but the primary interface is `pi` (not an editor). Only relevant if operator shells into the container.
-- **Action:** Keep but make optional — only COPY if a build arg is set, or move to a separate "dev" layer.
-
-### 13. `smoke-check` step 4 is brittle grep-based regression check
+### 19. Remove stale one-off checks from `smoke-check`
 - **File:** `bin/smoke-check`
-- **Issue:** Step `[4/5]` greps for removed auth-context references — this is a one-time migration check, not an ongoing concern.
-- **Action:** Remove once confident the migration is complete, or replace with a generic "banned patterns" file.
+- **Issue:** Step `[4/5]` only greps for a past auth-context migration. This is not a general regression check.
+- **Action:** Replace with a generic banned-patterns file or delete once the migration is fully trusted.
 
-### 14. `docs/architecture.md` duplicates README content
-- **Issue:** The architecture doc repeats the tool list, platform support table, and workflow descriptions already in README.
-- **Action:** Trim `architecture.md` to architectural decisions and diagrams. Link to README for tool inventory.
+### 20. Reconcile stale planning docs with current state
+- **Files:** `TODO.md`, `docs/analyst-improvement-plan.md`, `README.md`
+- **Issue:** `docs/analyst-improvement-plan.md` still lists some already-implemented gaps (for example first-look and analyst runbook) and overlaps with this TODO.
+- **Action:** Convert it into a current roadmap, archive completed sections, or link to this TODO as the source of truth.
 
-### 15. Session log format is not structured
-- **File:** Remote session logs (`logs/remote-sessions/`)
-- **Issue:** Logs use a custom `[timestamp] host=... >>> command` format that's hard to parse programmatically.
-- **Action:** Consider JSONL format for machine-parseable session reconstruction, or at minimum add a log-replay helper.
+### 21. Normalize executable bits for helper/playbook scripts
+- **Files:** `bin/smoke-check`, several `.pi/skills/**.sh`
+- **Issue:** Some shell scripts with shebangs are executable and others are not. This is harmless for inline/paste workflows but confusing for local direct execution.
+- **Action:** Decide policy: either all runnable scripts executable, or docs always invoke them through `sh`/`bash`.
 
-### 16. `ir-log` uses shell quoting that's hard to parse back
-- **File:** `bin/ir-log`
-- **Issue:** `printf '%q'` produces bash-escaped strings. Multi-word events become `event=checked\ host\ 10.0.0.5` which is awkward to grep/parse.
-- **Action:** Switch to a structured format (JSONL or tab-separated) for machine parsing while keeping human readability.
+### 22. Make optional editor config optional in the image
+- **Files:** `.config/nvim/**`, `Dockerfile`
+- **Issue:** Neovim config is useful for operator shells but not required for the pi-first workflow.
+- **Action:** Keep it, but consider a build arg or dev image layer if image minimalism becomes a priority.
 
-### 17. Missing container health/readiness signal
-- **Gap:** The Dockerfile starts `pi` but has no HEALTHCHECK.
-- **Action:** Add `HEALTHCHECK CMD ["pgrep", "-x", "node"]` or similar.
-
-### 18. `workspace/intel/*.yaml` files are empty stubs
-- **Files:** `workspace/intel/hosts.yaml`, etc.
-- **Issue:** These are empty files tracked via `workspace/.gitkeep`. Since `.gitignore` excludes `workspace/**`, they won't persist anyway.
-- **Action:** Remove the stub YAML files. The extension creates them on first use. Keep only `.gitkeep`.
+### 23. Use structured logs for machine parsing
+- **Files:** `bin/ir-log`, `.pi/extensions/remote-session.ts`
+- **Issue:** Audit/session logs use custom shell-ish text (`%q`, `[timestamp] host=... >>> command`). Human-readable, but awkward to replay or parse reliably.
+- **Action:** Add JSONL mode or a log conversion helper while preserving current human-readable output.
 
 ---
 
-## Architecture Assessment
+## Validated strengths to preserve
 
-### What's good:
-- **Clean separation**: Extensions split into `lib/` testable modules + registration layer
-- **Test coverage**: All helper functions have unit tests with meaningful assertions
-- **Safety model**: CONSTITUTION.md is thoughtful and actionable
-- **Audit logging**: Both `ir-log` and extension-level session logging
-- **Atomic writes**: Intel store uses tmp+rename pattern
-- **Write serialization**: `withIntelWriteLock` prevents concurrent corruption
-
-### What's not bloat (looks complex but earned):
-- The remote-session extension's marker-based output detection — this is the correct approach for persistent shell sessions
-- Telnet negotiation handling — necessary for network device support
-- The intel store's multi-file YAML layout — right trade-off for human editability vs. single-DB complexity
-- Multiple `intel-snippet` templates — the templates encode real domain knowledge about source provenance per artifact type
-
----
-
-## Suggested Priority Order
-
-1. Rotate and remove the `.env` secret (5 min)
-2. Delete `temp/` (or document why it's needed) (5 min)
-3. Remove `__pycache__` from git (2 min)
-4. Replace python3 subprocess YAML with JS yaml package (30 min)
-5. Simplify `intel-snippet` YAML serializer (15 min)
-6. Add `intel_update` tool (45 min)
-7. Extract connection functions from remote-session.ts (30 min)
-8. Add graceful YAML parse error handling (15 min)
-9. Everything else as time permits
+- Clear mission/safety model in `CONSTITUTION.md`.
+- Good separation of testable helper modules under `.pi/extensions/lib/`.
+- Useful native-only gather/IR/escalation playbooks across Linux, Windows, and macOS.
+- Strong operational primitives: persistent sessions, tunnels, relays, intel store, timeline.
+- Current unit tests are fast and pass; keep that speed while adding targeted edge-case coverage.
