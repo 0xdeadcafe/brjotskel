@@ -6,6 +6,9 @@ import {
   normalizeSource,
   normalizeIntelEntry,
   validateIntelEntry,
+  validateIntelStatusTransition,
+  INTEL_STATUS_ENUMS,
+  CREDENTIAL_TYPE_VALUES,
   resolveIntelDir,
   resolveStoredPath,
 } from '../../.pi/extensions/lib/intel-helpers.ts';
@@ -47,12 +50,64 @@ test('normalizeIntelEntry expands category-specific arrays and discovered source
 
   assert.deepEqual(credential.valid_on, ['db01']);
   assert.deepEqual(credential.related_hosts, ['jump01']);
+
+  const partial = normalizeIntelEntry('credential', { status: 'Confirmed' }, { partial: true });
+  assert.deepEqual(partial, { status: 'confirmed' });
 });
 
-test('validateIntelEntry enforces minimal required fields', () => {
-  assert.throws(() => validateIntelEntry('credential', { username: 'alice' }), /type' and 'username/);
-  assert.throws(() => validateIntelEntry('pivot', { chain: [] }), /require 'target'/);
-  assert.doesNotThrow(() => validateIntelEntry('credential', { type: 'password', username: 'alice' }));
+test('validateIntelEntry enforces category schemas, source, and enums', () => {
+  assert.ok(INTEL_STATUS_ENUMS.host.includes('contained'));
+  assert.ok(CREDENTIAL_TYPE_VALUES.includes('ssh-key'));
+
+  assert.throws(
+    () => validateIntelEntry('credential', { username: 'alice', status: 'active', source: { method: 'test' }, secret: 'pw' }),
+    /Missing required 'type'/,
+  );
+  assert.throws(
+    () => validateIntelEntry('credential', { type: 'magic', username: 'alice', status: 'active', source: { method: 'test' }, secret: 'pw' }),
+    /Invalid 'type' value 'magic'/,
+  );
+  assert.throws(
+    () => validateIntelEntry('host', { status: 'compromised', ip: '10.0.0.5' }),
+    /source\.method/,
+  );
+  assert.throws(
+    () => validateIntelEntry('host', { status: 'compromised', source: { method: 'scan' } }),
+    /at least one locator/,
+  );
+  assert.throws(
+    () => validateIntelEntry('pivot', { target: 'db01', status: 'suspected', chain: [], source: { method: 'test' } }),
+    /non-empty 'chain'/,
+  );
+  assert.throws(
+    () => validateIntelEntry('account', { type: 'domain-user', status: 'compromised', source: { method: 'AD enum' } }),
+    /Missing required 'username'/,
+  );
+
+  assert.doesNotThrow(() => validateIntelEntry('credential', {
+    type: 'password',
+    username: 'alice',
+    secret: 'pw',
+    status: 'active',
+    source: 'shadow file',
+  }));
+  assert.doesNotThrow(() => validateIntelEntry('credential', {
+    type: 'ssh-key',
+    username: 'deploy',
+    key_file: 'keys/deploy',
+    status: 'active',
+    source: { host: 'web01', method: 'ssh directory' },
+  }));
+});
+
+test('validateIntelStatusTransition blocks unsafe credential reactivation unless forced', () => {
+  assert.doesNotThrow(() => validateIntelStatusTransition('host', 'compromised', 'contained'));
+  assert.doesNotThrow(() => validateIntelStatusTransition('credential', 'active', 'rotated'));
+  assert.throws(
+    () => validateIntelStatusTransition('credential', 'rotated', 'active'),
+    /without force=true/,
+  );
+  assert.doesNotThrow(() => validateIntelStatusTransition('credential', 'rotated', 'active', { force: true }));
 });
 
 test('resolveIntelDir defaults to workspace/intel and honors env override', () => {

@@ -64,7 +64,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
-import { chooseSessionName, buildMarkerCommand, buildTunnelSpec, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSshArgs, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseHostPortTarget, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, relayVerifyOutputConfirmsListening, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
 import { parseShortcutArgs, formatLandShortcut, formatAssessShortcut, formatPursueShortcut, formatContainShortcut, formatEradicateShortcut, formatVerifyShortcut, buildAssessPrompt, buildPursuePrompt, buildContainPrompt, buildEradicatePrompt, buildVerifyPrompt, type OperatorSessionSummary } from "./lib/operator-shortcuts.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
@@ -105,6 +105,11 @@ interface RemoteSession {
   telnetState?: {
     mode: "data" | "iac" | "iac-command" | "sb" | "sb-iac";
     command?: number;
+  };
+  tainted?: {
+    reason: string;
+    at: Date;
+    command: string;
   };
 }
 
@@ -441,16 +446,33 @@ function connectTCP(name: string, host: string, port: number): Promise<RemoteSes
       execChain: Promise.resolve(),
     };
 
-    let connectTimeout = setTimeout(() => {
-      proc.kill();
+    let settled = false;
+    let stderr = "";
+    const connectTimeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill(); } catch { /* ignore */ }
       reject(new Error(`TCP connection to ${host}:${port} timed out (15s)`));
     }, 15_000);
+    const readyFallback = setTimeout(() => {
+      if (settled || proc.killed || proc.exitCode !== null) return;
+      settled = true;
+      session.ready = true;
+      clearTimeout(connectTimeout);
+      resolve(session);
+    }, 1500);
+
+    const clearConnectTimers = () => {
+      clearTimeout(connectTimeout);
+      clearTimeout(readyFallback);
+    };
 
     proc.stdout!.on("data", (data: Buffer) => {
       session.buffer += data.toString();
-      if (!session.ready) {
+      if (!session.ready && !settled) {
+        settled = true;
         session.ready = true;
-        clearTimeout(connectTimeout);
+        clearConnectTimers();
         if (session.buffer.match(/[#>]\s*$/)) {
           session.info.platform = "network-device";
           session.info.shellFamily = "unknown";
@@ -459,15 +481,26 @@ function connectTCP(name: string, host: string, port: number): Promise<RemoteSes
       }
     });
 
-    proc.on("close", () => {
-      clearTimeout(connectTimeout);
+    proc.stderr!.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      clearConnectTimers();
       sessions.delete(name);
       if (defaultSessionName === name) defaultSessionName = null;
+      if (!settled) {
+        settled = true;
+        reject(new Error(`TCP connection to ${host}:${port} closed before it became ready${stderr.trim() ? `: ${stderr.trim()}` : ` (exit=${code ?? "unknown"})`}`));
+      }
     });
 
     proc.on("error", (err) => {
-      clearTimeout(connectTimeout);
-      reject(new Error(`TCP connection failed: ${err.message}`));
+      clearConnectTimers();
+      if (!settled) {
+        settled = true;
+        reject(new Error(`TCP connection failed: ${err.message}`));
+      }
     });
   });
 }
@@ -497,17 +530,34 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
       telnetState: { mode: "data" },
     };
 
-    let connectTimeout = setTimeout(() => {
-      proc.kill();
+    let settled = false;
+    let stderr = "";
+    const connectTimeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill(); } catch { /* ignore */ }
       reject(new Error(`Telnet connection to ${host}:${port} timed out (15s)`));
     }, 15_000);
+    const readyFallback = setTimeout(() => {
+      if (settled || proc.killed || proc.exitCode !== null) return;
+      settled = true;
+      session.ready = true;
+      clearTimeout(connectTimeout);
+      resolve(session);
+    }, 1500);
+
+    const clearConnectTimers = () => {
+      clearTimeout(connectTimeout);
+      clearTimeout(readyFallback);
+    };
 
     proc.stdout!.on("data", (data: Buffer) => {
       const text = processTelnetChunk(session, data);
       session.buffer += text;
-      if (!session.ready && text.length > 0) {
+      if (!session.ready && text.length > 0 && !settled) {
+        settled = true;
         session.ready = true;
-        clearTimeout(connectTimeout);
+        clearConnectTimers();
         if (session.buffer.match(/[#>:]\s*$/)) {
           session.info.platform = "network-device";
           session.info.shellFamily = "unknown";
@@ -516,15 +566,26 @@ function connectTelnet(name: string, host: string, port: number): Promise<Remote
       }
     });
 
-    proc.on("close", () => {
-      clearTimeout(connectTimeout);
+    proc.stderr!.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      clearConnectTimers();
       sessions.delete(name);
       if (defaultSessionName === name) defaultSessionName = null;
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Telnet connection to ${host}:${port} closed before it became ready${stderr.trim() ? `: ${stderr.trim()}` : ` (exit=${code ?? "unknown"})`}`));
+      }
     });
 
     proc.on("error", (err) => {
-      clearTimeout(connectTimeout);
-      reject(new Error(`Telnet connection failed: ${err.message}`));
+      clearConnectTimers();
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Telnet connection failed: ${err.message}`));
+      }
     });
   });
 }
@@ -539,6 +600,11 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
     if (!session.process || session.process.killed) {
       sessions.delete(session.info.name);
       reject(new Error(`Session '${session.info.name}' has been disconnected.`));
+      return;
+    }
+
+    if (session.tainted) {
+      reject(new Error(`Session '${session.info.name}' is tainted: ${session.tainted.reason}. Disconnect and reconnect before running more commands.`));
       return;
     }
 
@@ -582,8 +648,10 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       if (idx !== -1) session.commandQueue.splice(idx, 1);
       const partial = session.buffer.trim();
       session.buffer = "";
-      logToSession(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s] ${partial}`);
-      resolve(`[Command timed out after ${timeoutMs / 1000}s]\n${partial}`);
+      const reason = `previous command timed out after ${timeoutMs / 1000}s and may still be running`;
+      session.tainted = { reason, at: new Date(), command };
+      logToSession(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s; SESSION TAINTED] ${partial}`);
+      resolve(`[Command timed out after ${timeoutMs / 1000}s]\nSession marked tainted because the remote command may still be running. Disconnect and reconnect before issuing more commands.\n${partial}`);
     }, timeoutMs);
 
     session.commandQueue.push({
@@ -630,7 +698,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       protocol: StringEnum(["ssh", "winrm", "tcp", "telnet"] as const),
-      target: Type.String({ description: "Connection target: user@host or host for SSH/WinRM, host:port for TCP/telnet" }),
+      target: Type.String({ description: "Connection target: user@host or host for SSH/WinRM; host:port, host with port=, or [IPv6]:port for TCP/telnet" }),
       name: Type.String({ description: "Session name for identification (e.g., 'web01', 'dc01', 'pivot-host')" }),
       port: Type.Optional(Type.Number({ description: "Override port (SSH default: 22, WinRM: 5985, TCP: required in target)" })),
       identity: Type.Optional(Type.String({ description: "SSH identity file path (e.g., recovered key from compromised host)" })),
@@ -682,15 +750,15 @@ export default function (pi: ExtensionAPI) {
             });
             break;
           case "tcp": {
-            const [host, portStr] = params.target.includes(":") ? params.target.split(":") : [params.target, "23"];
-            const port = params.port || parseInt(portStr, 10);
-            session = await connectTCP(params.name, host, port);
+            const parsed = parseHostPortTarget(params.target, params.port ?? 23);
+            const port = params.port ?? parsed.port;
+            session = await connectTCP(params.name, parsed.host, port);
             break;
           }
           case "telnet": {
-            const [host, portStr] = params.target.includes(":") ? params.target.split(":") : [params.target, "23"];
-            const port = params.port || parseInt(portStr, 10);
-            session = await connectTelnet(params.name, host, port);
+            const parsed = parseHostPortTarget(params.target, params.port ?? 23);
+            const port = params.port ?? parsed.port;
+            session = await connectTelnet(params.name, parsed.host, port);
             break;
           }
         }
@@ -860,11 +928,12 @@ export default function (pi: ExtensionAPI) {
           const alive = !session.process.killed;
           const duration = Math.round((Date.now() - info.connectedAt.getTime()) / 1000);
           const isDefault = name === defaultSessionName ? " [DEFAULT]" : "";
-          const status = alive ? "✓" : "✗";
+          const status = session.tainted ? "⚠" : (alive ? "✓" : "✗");
 
           lines.push(`  ${status} ${name}${isDefault}`);
           lines.push(`    Target: ${info.protocol.toUpperCase()} → ${info.target}`);
           lines.push(`    Platform: ${info.platform} | Commands: ${info.commandCount} | Uptime: ${duration}s`);
+          if (session.tainted) lines.push(`    State: TAINTED since ${session.tainted.at.toISOString()} — ${session.tainted.reason}`);
           lines.push(`    Last command: ${info.lastCommandAt?.toISOString() || "none"}`);
           lines.push("");
         }
@@ -984,8 +1053,9 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Create SSH tunnel/port forward for pivoting through compromised hosts",
     promptGuidelines: [
       "Use remote_tunnel to pivot through compromised hosts and reach internal systems.",
-      "For multi-hop: create a local forward to SSH on next hop, then remote_connect to localhost on that port.",
-      "Use type=dynamic for SOCKS proxy when routing multiple tools (nmap, crackmapexec) through a pivot.",
+      "For multi-hop: use proxy_jump or create a local forward to SSH on next hop, then remote_connect to localhost on that port.",
+      "Password-only SSH pivots are supported via password=... when sshpass is available.",
+      "Use type=dynamic for SOCKS proxy when routing multiple tools (nmap, netexec) through a pivot.",
       "Always close tunnels with remote_tunnel_close when no longer needed.",
     ],
     parameters: Type.Object({
@@ -996,6 +1066,8 @@ export default function (pi: ExtensionAPI) {
       remote_port: Type.Optional(Type.Number({ description: "Target port on remote_host for local forwards, or listening port on the remote SSH host for remote forwards" })),
       ssh_port: Type.Optional(Type.Number({ description: "SSH port on the hop host (default: 22)" })),
       identity: Type.Optional(Type.String({ description: "SSH identity file for the hop" })),
+      password: Type.Optional(Type.String({ description: "SSH password for the hop. Uses sshpass when available." })),
+      proxy_jump: Type.Optional(Type.String({ description: "SSH ProxyJump host/chain to reach the hop (e.g., 'user@jumpbox' or 'user@hop1,user@hop2')" })),
       description: Type.Optional(Type.String({ description: "Human description (e.g., 'SOCKS through web01 to DB segment')" })),
     }),
 
@@ -1027,26 +1099,30 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const args: string[] = [
-        "-N",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "ExitOnForwardFailure=yes",
-      ];
-
-      if (params.ssh_port) args.push("-p", String(params.ssh_port));
-      if (params.identity) args.push("-i", params.identity);
-
-      const tunnelSpec = buildTunnelSpec(params.type, params.local_port, params.remote_host, params.remote_port);
-      const forwardSpec = tunnelSpec.forwardSpec;
-      args.push(...tunnelSpec.sshArgs);
-
-      args.push(params.via);
-
-      const proc = spawn("ssh", args, {
-        stdio: ["ignore", "pipe", "pipe"],
+      const { forwardSpec, sshArgs: args } = buildTunnelSshArgs({
+        type: params.type,
+        via: params.via,
+        localPort: params.local_port,
+        remoteHost: params.remote_host,
+        remotePort: params.remote_port,
+        sshPort: params.ssh_port,
+        identity: params.identity,
+        proxyJump: params.proxy_jump,
       });
+
+      const sshpassPath = existsSync("/usr/bin/sshpass") ? "/usr/bin/sshpass" : (existsSync("/bin/sshpass") ? "/bin/sshpass" : null);
+      if (params.password && !sshpassPath) {
+        throw new Error("SSH password authentication requested for remote_tunnel, but sshpass is not installed in the container. Install sshpass or use key-based auth.");
+      }
+
+      const proc = params.password
+        ? spawn(sshpassPath!, ["-e", "ssh", ...args], {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, SSHPASS: params.password },
+          })
+        : spawn("ssh", args, {
+            stdio: ["ignore", "pipe", "pipe"],
+          });
 
       const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
         let settled = false;
@@ -1270,7 +1346,7 @@ export default function (pi: ExtensionAPI) {
       const verifyCmd = buildRelayVerifyCommand(spec);
       const verifyOutput = await execCommand(session, verifyCmd, 10_000);
 
-      const listening = verifyOutput.includes(String(params.listen_port));
+      const listening = relayVerifyOutputConfirmsListening(spec, verifyOutput);
 
       if (!listening) {
         let cleanupNote = "cleanup not run";

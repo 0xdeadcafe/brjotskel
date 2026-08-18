@@ -197,6 +197,78 @@ bin/intel-snippet pivot \
   --source-playbook windows/putty-sessions.ps1
 ```
 
+## Required schema and lifecycle fields
+
+`intel_add` and `intel_update` validate entries before writing them. Validation errors are intentionally actionable and list the missing field or allowed enum values.
+
+### Required by every category
+
+- `status`: one of the category-specific values below
+- `source.method`: how this intel was discovered
+- Prefer also adding `source.host`, `source.path`, `source.tool`, and/or `source.playbook` when known
+
+### Hosts
+
+Required:
+- `status`
+- `source.method`
+- at least one locator: `ip`, `hostname`, non-empty `endpoints`, or non-empty `profile_artifacts`
+
+Allowed `status` values:
+- `unknown`, `in-scope`, `out-of-scope`, `suspected`, `confirmed`, `compromised`, `contained`, `remediated`, `eradicated`, `cleared`, `unreachable`, `decommissioned`
+
+### Credentials
+
+Required:
+- `type`
+- `username`
+- `status`
+- `source.method`
+- credential material: `secret`, `key_file`, or `ticket_file`
+
+Allowed `type` values:
+- `password`, `ntlm-hash`, `lm-hash`, `ssh-key`, `private-key`, `kerberos-tgt`, `kerberos-tgs`, `token`, `api-key`, `cookie`, `certificate`, `other`
+
+Allowed `status` values:
+- `unvalidated`, `suspected`, `compromised`, `active`, `confirmed`, `invalid`, `rotated`, `expired`, `revoked`, `disabled`, `inactive`
+
+### Accounts
+
+Required:
+- `type`
+- `username`
+- `status`
+- `source.method`
+
+Allowed `type` values:
+- `local`, `local-user`, `domain`, `domain-user`, `service-account`, `machine-account`, `group`, `cloud-user`, `other`
+
+Allowed `status` values:
+- `unknown`, `suspected`, `confirmed`, `compromised`, `active`, `contained`, `remediated`, `cleared`, `disabled`, `locked`, `inactive`
+
+### Pivots
+
+Required:
+- `target`
+- `status`
+- `source.method`
+- non-empty `chain` list with at least `hop` per item
+
+Allowed `status` values:
+- `suspected`, `confirmed`, `active`, `contained`, `blocked`, `cleared`, `inactive`
+
+### Updating lifecycle state
+
+Use `intel_update` instead of replacing entries by hand:
+
+```text
+intel_update(category="host", id="web01", fields="status: contained\nnotes: C2 blocked and persistence disabled", summary="web01 contained")
+intel_update(category="credential", id="admin-hash", fields="status: rotated", summary="admin hash rotated by identity team")
+intel_update(category="pivot", id="to-db01", fields="status: cleared", summary="Pivot path no longer active")
+```
+
+Arrays are union-merged by default, so adding a new `valid_on` host does not erase existing validation results. Set `replace_arrays=true` only when intentionally replacing a list. Credential terminal statuses (`rotated`, `expired`, `revoked`, `disabled`, `inactive`, `invalid`) are not reactivated without `force=true`; prefer a new credential ID for replacement secrets.
+
 ## Normalized fields
 
 ### Hosts

@@ -11,6 +11,8 @@
 | Pivot host has no SSH server, only a shell via WinRM/other | `remote_relay` (native relay tools) |
 | Need to reach a host two segments away | Chain: `remote_tunnel` + `remote_relay`, or relay + relay |
 
+`remote_tunnel` supports key auth (`identity=`), password auth (`password=` via `sshpass`), and SSH jump chains (`proxy_jump=`), matching `remote_connect` behavior.
+
 ## The `remote_relay` Tool
 
 Sets up a TCP port relay **on an existing session's host** using whatever native tools are available.

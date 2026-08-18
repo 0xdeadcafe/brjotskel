@@ -5,6 +5,10 @@ import {
   getFileMap,
   getCollectionKeyMap,
   addIntelRecord,
+  updateIntelRecord,
+  mergeIntelEntry,
+  timelineActionForIntelUpdate,
+  isInactiveCredentialStatus,
   appendTimelineEntry,
   formatHostQueryResult,
   formatCredentialQueryResult,
@@ -21,10 +25,53 @@ test('file and collection maps match store layout', () => {
   assert.equal(getCollectionKeyMap().pivot, 'paths');
 });
 
-test('addIntelRecord inserts entries under the requested collection', () => {
+test('addIntelRecord inserts entries and refuses accidental duplicate IDs', () => {
   const updated = addIntelRecord({ hosts: { ...hosts } }, 'hosts', 'db01', { ip: '10.10.20.10' });
   assert.equal(updated.hosts.db01.ip, '10.10.20.10');
   assert.equal(updated.hosts.web01.ip, '10.10.10.5');
+
+  assert.throws(
+    () => addIntelRecord(updated, 'hosts', 'web01', { ip: '10.10.10.6' }),
+    /already exists/,
+  );
+
+  const overwritten = addIntelRecord(updated, 'hosts', 'web01', { ip: '10.10.10.6' }, { overwrite: true });
+  assert.equal(overwritten.hosts.web01.ip, '10.10.10.6');
+});
+
+test('updateIntelRecord deep-merges objects and union-merges arrays by default', () => {
+  const updated = updateIntelRecord(
+    { credentials: { ...credentials } },
+    'credentials',
+    'deploy-ssh-key',
+    { valid_on: ['db01', 'web01'], source: { tool: 'ssh' }, status: 'confirmed' },
+  );
+
+  assert.deepEqual(updated.credentials['deploy-ssh-key'].valid_on, ['web01', 'db01']);
+  assert.equal(updated.credentials['deploy-ssh-key'].source.host, 'web01');
+  assert.equal(updated.credentials['deploy-ssh-key'].source.tool, 'ssh');
+  assert.equal(updated.credentials['deploy-ssh-key'].status, 'confirmed');
+
+  const replaced = mergeIntelEntry({ tags: ['a', 'b'] }, { tags: ['c'] }, { replaceArrays: true });
+  assert.deepEqual(replaced.tags, ['c']);
+  assert.throws(() => updateIntelRecord({ credentials: {} }, 'credentials', 'missing', { status: 'active' }), /not found/);
+});
+
+test('timelineActionForIntelUpdate maps lifecycle statuses to timeline actions', () => {
+  assert.equal(timelineActionForIntelUpdate('host', 'contained'), 'contained');
+  assert.equal(timelineActionForIntelUpdate('credential', 'rotated'), 'rotated');
+  assert.equal(timelineActionForIntelUpdate('pivot', 'cleared'), 'cleared');
+  assert.equal(timelineActionForIntelUpdate('credential', 'active'), 'confirmed');
+  assert.equal(timelineActionForIntelUpdate('account', 'disabled'), 'updated');
+});
+
+test('isInactiveCredentialStatus identifies credentials that must not be retrieved', () => {
+  assert.equal(isInactiveCredentialStatus('rotated'), true);
+  assert.equal(isInactiveCredentialStatus('Expired'), true);
+  assert.equal(isInactiveCredentialStatus('revoked'), true);
+  assert.equal(isInactiveCredentialStatus('invalid'), true);
+  assert.equal(isInactiveCredentialStatus('active'), false);
+  assert.equal(isInactiveCredentialStatus('unvalidated'), false);
 });
 
 test('appendTimelineEntry appends to existing timeline docs', () => {

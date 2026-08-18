@@ -1,5 +1,48 @@
 export type IntelCategory = "host" | "credential" | "account" | "pivot";
 
+function isPlainObject(value: any): boolean {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stableStringify(value: any): string {
+  if (!isPlainObject(value)) return JSON.stringify(value);
+  return JSON.stringify(Object.keys(value).sort().reduce((out: Record<string, any>, key) => {
+    out[key] = value[key];
+    return out;
+  }, {}));
+}
+
+export function mergeIntelEntry(existing: any, updates: any, options: { replaceArrays?: boolean } = {}): any {
+  if (!isPlainObject(existing)) return updates;
+  if (!isPlainObject(updates)) return updates;
+
+  const merged: Record<string, any> = { ...existing };
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+
+    if (Array.isArray(value) && Array.isArray(merged[key]) && !options.replaceArrays) {
+      const seen = new Set(merged[key].map(stableStringify));
+      merged[key] = [...merged[key]];
+      for (const item of value) {
+        const marker = stableStringify(item);
+        if (!seen.has(marker)) {
+          seen.add(marker);
+          merged[key].push(item);
+        }
+      }
+      continue;
+    }
+
+    if (isPlainObject(value) && isPlainObject(merged[key])) {
+      merged[key] = mergeIntelEntry(merged[key], value, options);
+      continue;
+    }
+
+    merged[key] = value;
+  }
+  return merged;
+}
+
 export function getFileMap(): Record<IntelCategory, string> {
   return {
     host: "hosts.yaml",
@@ -18,11 +61,40 @@ export function getCollectionKeyMap(): Record<IntelCategory, string> {
   };
 }
 
-export function addIntelRecord(store: Record<string, any>, collectionKey: string, id: string, entryData: any): Record<string, any> {
+export function addIntelRecord(store: Record<string, any>, collectionKey: string, id: string, entryData: any, options: { overwrite?: boolean } = {}): Record<string, any> {
   const next = { ...store };
   next[collectionKey] = { ...(next[collectionKey] || {}) };
+  if (Object.prototype.hasOwnProperty.call(next[collectionKey], id) && !options.overwrite) {
+    throw new Error(`Intel entry '${id}' already exists in '${collectionKey}'. Use overwrite=true only when replacing it intentionally.`);
+  }
   next[collectionKey][id] = entryData;
   return next;
+}
+
+export function updateIntelRecord(store: Record<string, any>, collectionKey: string, id: string, updates: any, options: { replaceArrays?: boolean } = {}): Record<string, any> {
+  const next = { ...store };
+  next[collectionKey] = { ...(next[collectionKey] || {}) };
+  if (!Object.prototype.hasOwnProperty.call(next[collectionKey], id)) {
+    throw new Error(`Intel entry '${id}' not found in '${collectionKey}'. Use intel_add for new entries.`);
+  }
+  next[collectionKey][id] = mergeIntelEntry(next[collectionKey][id], updates, options);
+  return next;
+}
+
+export function timelineActionForIntelUpdate(category: IntelCategory, status?: string): string {
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (normalizedStatus === "rotated") return "rotated";
+  if (normalizedStatus === "contained") return "contained";
+  if (normalizedStatus === "cleared") return "cleared";
+  if (normalizedStatus === "eradicated" || normalizedStatus === "remediated") return "eradicated";
+  if (normalizedStatus === "confirmed" || (category === "credential" && normalizedStatus === "active")) return "confirmed";
+  return "updated";
+}
+
+const INACTIVE_CREDENTIAL_STATUSES = new Set(["rotated", "expired", "revoked", "disabled", "inactive", "invalid"]);
+
+export function isInactiveCredentialStatus(status?: string): boolean {
+  return INACTIVE_CREDENTIAL_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
 export function appendTimelineEntry(timelineDoc: Record<string, any>, entry: Record<string, any>): Record<string, any> {

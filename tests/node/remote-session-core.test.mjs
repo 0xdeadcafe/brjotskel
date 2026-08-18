@@ -5,15 +5,18 @@ import {
   chooseSessionName,
   buildMarkerCommand,
   buildTunnelSpec,
+  buildTunnelSshArgs,
   buildTunnelDescription,
   buildTunnelUsageHint,
   processTelnetBytes,
+  parseHostPortTarget,
   parseWinRmTarget,
   detectRelayMethods,
   buildRelayCommand,
   buildRelayCleanupCommand,
   buildRelayProbeCommand,
   buildRelayVerifyCommand,
+  relayVerifyOutputConfirmsListening,
   validateRelaySpec,
 } from '../../.pi/extensions/lib/remote-session-core.ts';
 
@@ -35,7 +38,7 @@ test('buildMarkerCommand emits shell-specific marker wrappers', () => {
   assert.equal(buildMarkerCommand('posix', 'id', "ab'cd"), "id\necho 'ab'\\''cd'");
 });
 
-test('buildTunnelSpec, description, and usage hint format each tunnel type', () => {
+test('buildTunnelSpec, SSH args, description, and usage hint format each tunnel type', () => {
   assert.deepEqual(buildTunnelSpec('local', 2222, 'internal01', 22), {
     forwardSpec: 'L 2222:internal01:22',
     sshArgs: ['-L', '2222:internal01:22'],
@@ -49,6 +52,20 @@ test('buildTunnelSpec, description, and usage hint format each tunnel type', () 
     sshArgs: ['-D', '1080'],
   });
 
+  const sshArgs = buildTunnelSshArgs({
+    type: 'local',
+    via: 'root@web01',
+    localPort: 2222,
+    remoteHost: 'internal01',
+    remotePort: 22,
+    sshPort: 2022,
+    identity: '/tmp/key',
+    proxyJump: 'user@jump1,user@jump2',
+  });
+  assert.equal(sshArgs.forwardSpec, 'L 2222:internal01:22');
+  assert.deepEqual(sshArgs.sshArgs.slice(-9), ['-p', '2022', '-i', '/tmp/key', '-J', 'user@jump1,user@jump2', '-L', '2222:internal01:22', 'root@web01']);
+  assert.ok(sshArgs.sshArgs.includes('ExitOnForwardFailure=yes'));
+
   assert.equal(buildTunnelDescription('dynamic', 'root@web01', 1080), 'SOCKS proxy via root@web01');
   assert.equal(buildTunnelDescription('local', 'root@web01', 2222, 'internal01', 22), 'local forward 2222→internal01:22 via root@web01');
   assert.equal(buildTunnelDescription('remote', 'root@web01', 8080, undefined, 8443, 'custom desc'), 'custom desc');
@@ -56,6 +73,15 @@ test('buildTunnelSpec, description, and usage hint format each tunnel type', () 
   assert.match(buildTunnelUsageHint('local', 'root@web01', 2222), /remote_connect\(protocol="ssh", target="user@localhost", port=2222, name="next-hop"\)/);
   assert.match(buildTunnelUsageHint('dynamic', 'root@web01', 1080), /SOCKS5 proxy at: localhost:1080/);
   assert.match(buildTunnelUsageHint('remote', 'root@web01', 8080, 8443), /connections to root@web01:8443 are forwarded to localhost:8080/);
+});
+
+test('parseHostPortTarget handles host:port, IPv6, default ports, and malformed targets', () => {
+  assert.deepEqual(parseHostPortTarget('switch01:2323', 23), { host: 'switch01', port: 2323, explicitPort: true });
+  assert.deepEqual(parseHostPortTarget('switch01', 23), { host: 'switch01', port: 23, explicitPort: false });
+  assert.deepEqual(parseHostPortTarget('[2001:db8::10]:2323', 23), { host: '2001:db8::10', port: 2323, explicitPort: true });
+  assert.deepEqual(parseHostPortTarget('2001:db8::10', 23), { host: '2001:db8::10', port: 23, explicitPort: false });
+  assert.throws(() => parseHostPortTarget('switch01:notaport', 23), /port must be an integer/);
+  assert.throws(() => parseHostPortTarget('[2001:db8::10:2323', 23), /Bracketed IPv6/);
 });
 
 test('parseWinRmTarget supports user@host targets and explicit user override', () => {
@@ -146,17 +172,18 @@ test('buildRelayCommand generates correct commands for each method', () => {
   const base = { listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 };
 
   const socat = buildRelayCommand({ ...base, method: 'socat' });
-  assert.match(socat, /socat TCP-LISTEN:4422,bind=0\.0\.0\.0,fork,reuseaddr TCP:10\.10\.20\.5:22 &/);
+  assert.match(socat, /socat TCP-LISTEN:4422,bind='0\.0\.0\.0',fork,reuseaddr TCP:'10\.10\.20\.5':22 &/);
 
   const ncat = buildRelayCommand({ ...base, method: 'ncat' });
-  assert.match(ncat, /ncat -l 0\.0\.0\.0 4422 --sh-exec 'ncat 10\.10\.20\.5 22' &/);
+  assert.equal(ncat, "ncat -l '0.0.0.0' 4422 --sh-exec 'ncat '\\''10.10.20.5'\\'' 22' &");
 
   const netsh = buildRelayCommand({ ...base, method: 'netsh-portproxy' });
   assert.match(netsh, /netsh interface portproxy add v4tov4 listenport=4422 listenaddress=0\.0\.0\.0 connectport=22 connectaddress=10\.10\.20\.5/);
 
   const ncBsd = buildRelayCommand({ ...base, method: 'nc-openbsd' });
   assert.match(ncBsd, /mkfifo/);
-  assert.match(ncBsd, /nc -l 0\.0\.0\.0 4422/);
+  assert.match(ncBsd, /nc -l '0\.0\.0\.0' 4422/);
+  assert.match(ncBsd, /\/tmp\/\.pi-relay-4422/);
 });
 
 test('buildRelayCleanupCommand generates correct teardown for each method', () => {
@@ -169,7 +196,7 @@ test('buildRelayCleanupCommand generates correct teardown for each method', () =
   assert.match(netsh, /netsh interface portproxy delete v4tov4 listenport=4422 listenaddress=127\.0\.0\.1/);
 
   const nc = buildRelayCleanupCommand({ ...base, method: 'nc-openbsd' });
-  assert.match(nc, /rm -f \/tmp\/.r4422/);
+  assert.match(nc, /rm -f '\/tmp\/\.pi-relay-4422'/);
 });
 
 test('buildRelayProbeCommand returns platform-appropriate probe', () => {
@@ -186,4 +213,16 @@ test('buildRelayVerifyCommand checks listener presence', () => {
 
   const netshVerify = buildRelayVerifyCommand({ method: 'netsh-portproxy', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 });
   assert.match(netshVerify, /netsh interface portproxy show/);
+});
+
+test('relayVerifyOutputConfirmsListening requires confirmed listener rows', () => {
+  const posixSpec = { method: 'socat', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22 };
+  assert.equal(relayVerifyOutputConfirmsListening(posixSpec, "LISTEN 0 128 0.0.0.0:4422 0.0.0.0:* users:((\"socat\",pid=123))"), true);
+  assert.equal(relayVerifyOutputConfirmsListening(posixSpec, "ss -tlnp | grep ':4422'\nunable to verify listener"), false);
+  assert.equal(relayVerifyOutputConfirmsListening(posixSpec, "tcp 0 0 10.0.0.1:4422 10.0.0.2:5555 ESTABLISHED"), false);
+
+  const netshSpec = { method: 'netsh-portproxy', listenPort: 4422, targetHost: '10.10.20.5', targetPort: 22, listenAddress: '127.0.0.1' };
+  const netshOutput = `Listen on ipv4:             Connect to ipv4:\n\nAddress         Port        Address         Port\n--------------- ----------  --------------- ----------\n127.0.0.1       4422        10.10.20.5      22`;
+  assert.equal(relayVerifyOutputConfirmsListening(netshSpec, netshOutput), true);
+  assert.equal(relayVerifyOutputConfirmsListening(netshSpec, netshOutput.replace('127.0.0.1', '0.0.0.0')), false);
 });

@@ -107,7 +107,7 @@ category_pattern() {
     privesc|privilege-escalation) echo "Privilege|privilege|SUID|sudo|UAC|SeImpersonate|Token|Potato|kernel exploit|capability" ;;
     tunneling|tunnel|relay) echo "tunnel|Tunnel|relay|Relay|SSH.*-[LRD]|chisel|ligolo|socat|netsh.*portproxy|SOCKS|proxy|NTLM|iodine|dns2tcp|ptunnel" ;;
     persist-implant|persistence-implant) echo "implant|Create|create|Register-Scheduled|schtasks /create|New-Service|sc create|crontab|authorized_keys|systemd|WMI.*subscription|webshell|BITS" ;;
-    lateral-offense|lateral-movement-offensive) echo "psexec|wmiexec|smbexec|crackmapexec|evil-winrm|Invoke-Command|Enter-PSSession|Pass-the-Hash|Pass-the-Ticket|DCSync|secretsdump|Mimikatz|pth" ;;
+    lateral-offense|lateral-movement-offensive) echo "psexec|wmiexec|smbexec|netexec|evil-winrm|Invoke-Command|Enter-PSSession|Pass-the-Hash|Pass-the-Ticket|DCSync|secretsdump|Mimikatz|pth" ;;
     containment|active-containment) echo "containment|Containment|kill process|stop-service|disable account|block c2|firewall block|isolate host|quarantine|netsh advfirewall|iptables|ufw|kill -9|taskkill" ;;
     eradication|remove-persistence) echo "eradication|Eradication|remove persistence|delete scheduled task|sc delete|Remove-Item|reg delete|systemctl disable|crontab -r|authorized_keys|verification|verify" ;;
     anti-forensics|antiforensics|timestomp) echo "timestomp|Timestomp|SetCreationTime|SetLastWriteTime|touch.*-t|log.*clear|Clear-EventLog|wevtutil cl|truncate|shred|1102|104" ;;

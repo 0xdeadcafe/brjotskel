@@ -39,8 +39,24 @@ RUN apt-get update \
 
 # --- Impacket & NetExec ---
 RUN pip3 install --no-cache-dir --break-system-packages impacket
-RUN pip3 install --no-cache-dir --break-system-packages git+https://github.com/Pennyw0rth/NetExec 2>/dev/null \
-    || echo 'NetExec install skipped — install manually if needed'
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && export RUSTUP_HOME=/tmp/rustup CARGO_HOME=/tmp/cargo PATH=/tmp/cargo/bin:$PATH \
+    && curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+    && pip3 install --no-cache-dir --break-system-packages git+https://github.com/Pennyw0rth/NetExec \
+    && if command -v netexec >/dev/null 2>&1; then \
+         true; \
+       elif command -v nxc >/dev/null 2>&1; then \
+         ln -sf "$(command -v nxc)" /usr/local/bin/netexec; \
+       else \
+         echo 'NetExec installation did not provide netexec or nxc' >&2; \
+         exit 1; \
+       fi \
+    && (netexec --version || netexec --help >/dev/null) \
+    && rm -rf /root/.nxc /root/.netexec /tmp/rustup /tmp/cargo \
+    && apt-get purge -y --auto-remove build-essential \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- Node.js (for pi agent / extensions) ---
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
@@ -54,9 +70,10 @@ RUN npm install -g @earendil-works/pi-coding-agent
 # --- Project layout ---
 WORKDIR /opt/brjotskel
 
-COPY bin/ir-log /usr/local/bin/ir-log
-COPY bin/intel-snippet /usr/local/bin/intel-snippet
-RUN chmod +x /usr/local/bin/ir-log /usr/local/bin/intel-snippet
+COPY bin/ /opt/brjotskel/bin/
+RUN chmod +x /opt/brjotskel/bin/ir-log /opt/brjotskel/bin/intel-snippet /opt/brjotskel/bin/test /opt/brjotskel/bin/smoke-check \
+    && ln -sf /opt/brjotskel/bin/ir-log /usr/local/bin/ir-log \
+    && ln -sf /opt/brjotskel/bin/intel-snippet /usr/local/bin/intel-snippet
 
 COPY CONSTITUTION.md README.md /opt/brjotskel/
 COPY docs/ /opt/brjotskel/docs/

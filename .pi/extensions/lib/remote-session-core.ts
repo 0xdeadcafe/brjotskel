@@ -64,6 +64,84 @@ export function buildTunnelSpec(type: TunnelType, localPort: number, remoteHost?
   }
 }
 
+export interface TunnelSshOptions {
+  type: TunnelType;
+  via: string;
+  localPort: number;
+  remoteHost?: string;
+  remotePort?: number;
+  sshPort?: number;
+  identity?: string;
+  proxyJump?: string;
+}
+
+export function buildTunnelSshArgs(options: TunnelSshOptions): { forwardSpec: string; sshArgs: string[] } {
+  validateRelayPort(options.localPort, "local_port");
+  if (options.remotePort !== undefined) validateRelayPort(options.remotePort, "remote_port");
+  if (options.sshPort !== undefined) validateRelayPort(options.sshPort, "ssh_port");
+
+  const args: string[] = [
+    "-N",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "ExitOnForwardFailure=yes",
+  ];
+
+  if (options.sshPort) args.push("-p", String(options.sshPort));
+  if (options.identity) args.push("-i", options.identity);
+  if (options.proxyJump) args.push("-J", options.proxyJump);
+
+  const tunnelSpec = buildTunnelSpec(options.type, options.localPort, options.remoteHost, options.remotePort);
+  args.push(...tunnelSpec.sshArgs);
+  args.push(options.via);
+
+  return { forwardSpec: tunnelSpec.forwardSpec, sshArgs: args };
+}
+
+function parsePortString(value: string, fieldName = "port"): number {
+  if (!/^\d+$/.test(value)) throw new Error(`${fieldName} must be an integer from 1 to 65535.`);
+  const port = Number.parseInt(value, 10);
+  validateRelayPort(port, fieldName);
+  return port;
+}
+
+export function parseHostPortTarget(target: string, defaultPort = 23): { host: string; port: number; explicitPort: boolean } {
+  validateRelayPort(defaultPort, "default_port");
+  const text = String(target || "").trim();
+  if (!text) throw new Error("target is required.");
+
+  if (text.startsWith("[")) {
+    const match = text.match(/^\[([^\]]+)](?::(.+))?$/);
+    if (!match) throw new Error("Bracketed IPv6 targets must use '[host]' or '[host]:port' syntax.");
+    const host = match[1].trim();
+    if (!host) throw new Error("target host is required.");
+    return {
+      host,
+      port: match[2] ? parsePortString(match[2], "port") : defaultPort,
+      explicitPort: Boolean(match[2]),
+    };
+  }
+
+  if (text.includes("]")) throw new Error("Malformed bracketed host target.");
+
+  const colonCount = (text.match(/:/g) || []).length;
+  if (colonCount === 0) return { host: text, port: defaultPort, explicitPort: false };
+
+  if (colonCount === 1) {
+    const idx = text.lastIndexOf(":");
+    const host = text.slice(0, idx).trim();
+    const portText = text.slice(idx + 1).trim();
+    if (!host) throw new Error("target host is required.");
+    if (!portText) throw new Error("target port is required after ':'.");
+    return { host, port: parsePortString(portText, "port"), explicitPort: true };
+  }
+
+  // Multiple colons are treated as an IPv6 literal without an inline port.
+  // Use [IPv6]:port or the separate port parameter for explicit IPv6 ports.
+  return { host: text, port: defaultPort, explicitPort: false };
+}
+
 export function buildTunnelDescription(type: TunnelType, via: string, localPort: number, remoteHost?: string, remotePort?: number, description?: string): string {
   if (description) return description;
   return type === "dynamic"
@@ -78,7 +156,7 @@ export function buildTunnelUsageHint(type: TunnelType, via: string, localPort: n
     return `Access via: localhost:${localPort}\nPivot: remote_connect(protocol="ssh", target="user@localhost", port=${localPort}, name="next-hop")`;
   }
   if (type === "dynamic") {
-    return `SOCKS5 proxy at: localhost:${localPort}\nUsage: proxychains nmap -sT -Pn <targets> or proxychains crackmapexec smb <targets>`;
+    return `SOCKS5 proxy at: localhost:${localPort}\nUsage: proxychains nmap -sT -Pn <targets> or proxychains netexec smb <targets>`;
   }
   return `Remote forward active: connections to ${via}:${remotePort} are forwarded to localhost:${localPort} on the harness.`;
 }
@@ -99,6 +177,10 @@ export interface RelaySpec {
 
 const SAFE_RELAY_HOST_RE = /^[A-Za-z0-9_.:-]+$/;
 const RELAY_METHODS = new Set<RelayMethod>(["ncat", "socat", "nc-openbsd", "nc-traditional", "netsh-portproxy"]);
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 export function validateRelayPort(port: number, fieldName = "port"): void {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -160,20 +242,28 @@ export function buildRelayCommand(spec: RelaySpec): string {
   validateRelaySpec(spec);
   const { method, listenPort, targetHost, targetPort, listenAddress } = spec;
   const bindAddr = listenAddress || "0.0.0.0";
+  const qBindAddr = shellSingleQuote(bindAddr);
+  const qTargetHost = shellSingleQuote(targetHost);
+  const fifoPath = `/tmp/.pi-relay-${listenPort}`;
+  const qFifoPath = shellSingleQuote(fifoPath);
 
   switch (method) {
     case "socat":
-      return `socat TCP-LISTEN:${listenPort},bind=${bindAddr},fork,reuseaddr TCP:${targetHost}:${targetPort} &`;
+      return `socat TCP-LISTEN:${listenPort},bind=${qBindAddr},fork,reuseaddr TCP:${qTargetHost}:${targetPort} &`;
 
     case "ncat":
-      return `ncat -l ${bindAddr} ${listenPort} --sh-exec 'ncat ${targetHost} ${targetPort}' &`;
+      return `ncat -l ${qBindAddr} ${listenPort} --sh-exec ${shellSingleQuote(`ncat ${qTargetHost} ${targetPort}`)} &`;
 
     case "nc-openbsd":
-      // OpenBSD nc doesn't have --sh-exec; use a fifo
-      return `rm -f /tmp/.r${listenPort} && mkfifo /tmp/.r${listenPort} && (nc -l ${bindAddr} ${listenPort} < /tmp/.r${listenPort} | nc ${targetHost} ${targetPort} > /tmp/.r${listenPort} &)`;
+      // OpenBSD nc doesn't have --sh-exec; use a fifo.
+      return `rm -f ${qFifoPath} && mkfifo ${qFifoPath} && (nc -l ${qBindAddr} ${listenPort} < ${qFifoPath} | nc ${qTargetHost} ${targetPort} > ${qFifoPath} &)`;
 
-    case "nc-traditional":
-      return `rm -f /tmp/.r${listenPort} && mkfifo /tmp/.r${listenPort} && (nc -l -p ${listenPort} < /tmp/.r${listenPort} | nc ${targetHost} ${targetPort} > /tmp/.r${listenPort} &)`;
+    case "nc-traditional": {
+      const listenArgs = listenAddress
+        ? `-l -s ${qBindAddr} -p ${listenPort}`
+        : `-l -p ${listenPort}`;
+      return `rm -f ${qFifoPath} && mkfifo ${qFifoPath} && (nc ${listenArgs} < ${qFifoPath} | nc ${qTargetHost} ${targetPort} > ${qFifoPath} &)`;
+    }
 
     case "netsh-portproxy":
       return `netsh interface portproxy add v4tov4 listenport=${listenPort} listenaddress=${bindAddr} connectport=${targetPort} connectaddress=${targetHost}`;
@@ -190,17 +280,19 @@ export function buildRelayCleanupCommand(spec: RelaySpec): string {
   validateRelaySpec(spec);
   const { method, listenPort, listenAddress } = spec;
   const bindAddr = listenAddress || "0.0.0.0";
+  const fifoPath = `/tmp/.pi-relay-${listenPort}`;
+  const qFifoPath = shellSingleQuote(fifoPath);
 
   switch (method) {
     case "socat":
-      return `pkill -f 'socat TCP-LISTEN:${listenPort}' 2>/dev/null; echo 'relay stopped'`;
+      return `pkill -f ${shellSingleQuote(`socat TCP-LISTEN:${listenPort}`)} 2>/dev/null; echo 'relay stopped'`;
 
     case "ncat":
-      return `pkill -f 'ncat -l.*${listenPort}' 2>/dev/null; echo 'relay stopped'`;
+      return `pkill -f ${shellSingleQuote(`ncat -l.*${listenPort}`)} 2>/dev/null; echo 'relay stopped'`;
 
     case "nc-openbsd":
     case "nc-traditional":
-      return `pkill -f 'nc -l.*${listenPort}' 2>/dev/null; rm -f /tmp/.r${listenPort}; echo 'relay stopped'`;
+      return `pkill -f ${shellSingleQuote(`nc -l.*${listenPort}`)} 2>/dev/null; rm -f ${qFifoPath}; echo 'relay stopped'`;
 
     case "netsh-portproxy":
       return `netsh interface portproxy delete v4tov4 listenport=${listenPort} listenaddress=${bindAddr}`;
@@ -229,6 +321,33 @@ export function buildRelayVerifyCommand(spec: RelaySpec): string {
     return `netsh interface portproxy show v4tov4`;
   }
   return `ss -tlnp 2>/dev/null | grep ':${spec.listenPort}' || netstat -tlnp 2>/dev/null | grep ':${spec.listenPort}' || echo 'unable to verify listener'`;
+}
+
+export function relayVerifyOutputConfirmsListening(spec: RelaySpec, verifyOutput: string): boolean {
+  validateRelaySpec(spec);
+  const text = verifyOutput.replace(/\r/g, "");
+  const port = String(spec.listenPort);
+  const bindAddr = spec.listenAddress || "0.0.0.0";
+
+  if (/unable to verify listener/i.test(text)) return false;
+
+  if (spec.method === "netsh-portproxy") {
+    const bindMatches = (addr: string): boolean => {
+      if (bindAddr === "0.0.0.0") return addr === "0.0.0.0" || addr === "*";
+      return addr.toLowerCase() === bindAddr.toLowerCase();
+    };
+
+    for (const line of text.split("\n")) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length >= 4 && columns[1] === port && bindMatches(columns[0])) return true;
+    }
+
+    const keyValueRe = new RegExp(`listenaddress=${escapeRegex(bindAddr)}\\b.*listenport=${escapeRegex(port)}\\b|listenport=${escapeRegex(port)}\\b.*listenaddress=${escapeRegex(bindAddr)}\\b`, "i");
+    return keyValueRe.test(text);
+  }
+
+  const portRe = new RegExp(`[:.]${escapeRegex(port)}(?:\\s|$|\\*)`);
+  return text.split("\n").some(line => /\bLISTEN\b/i.test(line) && portRe.test(line));
 }
 
 export function processTelnetBytes(state: TelnetState | undefined, data: Buffer | number[]): { text: string; replies: number[][]; state: TelnetState } {

@@ -1,48 +1,34 @@
 #!/usr/bin/env python3
 import argparse
+import json
+
+import yaml
 
 
-def y(v, indent=0):
-    sp = '  ' * indent
-    if isinstance(v, dict):
-        out = []
-        for k, val in v.items():
-            if isinstance(val, (dict, list)):
-                out.append(f"{sp}{k}:")
-                out.append(y(val, indent + 1))
-            elif val is None:
-                out.append(f"{sp}{k}: null")
-            elif isinstance(val, bool):
-                out.append(f"{sp}{k}: {'true' if val else 'false'}")
-            elif isinstance(val, (int, float)):
-                out.append(f"{sp}{k}: {val}")
-            else:
-                s = str(val)
-                if any(c in s for c in [':', '#', '{', '}', '[', ']', ',', '&', '*']) or s.strip() != s or '\\' in s:
-                    out.append(f'{sp}{k}: "{s.replace("\\", "\\\\").replace("\"", "\\\"")}"')
-                else:
-                    out.append(f"{sp}{k}: {s}")
-        return '\n'.join(out)
-    if isinstance(v, list):
-        out = []
-        for item in v:
-            if isinstance(item, (dict, list)):
-                out.append(f"{sp}-")
-                out.append(y(item, indent + 1))
-            elif item is None:
-                out.append(f"{sp}- null")
-            elif isinstance(item, bool):
-                out.append(f"{sp}- {'true' if item else 'false'}")
-            elif isinstance(item, (int, float)):
-                out.append(f"{sp}- {item}")
-            else:
-                s = str(item)
-                if any(c in s for c in [':', '#', '{', '}', '[', ']', ',', '&', '*']) or s.strip() != s or '\\' in s:
-                    out.append(f'{sp}- "{s.replace("\\", "\\\\").replace("\"", "\\\"")}"')
-                else:
-                    out.append(f"{sp}- {s}")
-        return '\n'.join(out)
-    return f"{sp}{v}"
+class QuotedStringDumper(yaml.SafeDumper):
+    """YAML dumper that keeps every string explicitly quoted.
+
+    These snippets are fed back into a YAML parser later. Quoting all strings
+    prevents accidental type shifts for secrets/notes such as `true`, `1234`,
+    `null`, timestamps, or multiline values.
+    """
+
+
+def _represent_quoted_string(dumper, value):
+    return dumper.represent_scalar('tag:yaml.org,2002:str', value, style='"')
+
+
+QuotedStringDumper.add_representer(str, _represent_quoted_string)
+
+
+def dump_yaml(data):
+    return yaml.dump(
+        data,
+        Dumper=QuotedStringDumper,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    ).rstrip('\n')
 
 
 def compact(v):
@@ -62,11 +48,18 @@ def compact(v):
 
 def print_result(category, entry_id, data, summary):
     data = compact(data)
-    yaml_text = y(data)
+    yaml_text = dump_yaml(data)
     print("=== YAML ===")
     print(yaml_text)
     print("\n=== intel_add ===")
-    print(f'intel_add(category="{category}", id="{entry_id}", data="""{yaml_text}\n""", summary="{summary}")')
+    print(
+        "intel_add("
+        f"category={json.dumps(category)}, "
+        f"id={json.dumps(entry_id)}, "
+        f"data={json.dumps(yaml_text + chr(10))}, "
+        f"summary={json.dumps(summary)}"
+        ")"
+    )
 
 
 def add_common_source(obj, args):

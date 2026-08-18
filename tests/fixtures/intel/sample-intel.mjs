@@ -27,9 +27,12 @@ export const credentials = {
 export const accounts = {
   'corp\\sqlsvc': {
     type: 'domain',
+    username: 'sqlsvc',
+    domain: 'corp.local',
     privileges: ['Domain Users'],
     status: 'compromised',
     access_to: ['web01'],
+    source: { host: 'dc01', method: 'AD user enumeration' },
   },
 };
 
@@ -39,6 +42,7 @@ export const pivots = {
     status: 'confirmed',
     chain: [{ hop: 'adminws', method: 'ssh-proxy-jump' }],
     evidence: [{ kind: 'putty-session', path: 'HKCU\\Software\\SimonTatham\\PuTTY\\Sessions\\web01' }],
+    source: { host: 'adminws', method: 'saved PuTTY session', path: 'HKCU\\Software\\SimonTatham\\PuTTY\\Sessions\\web01' },
   },
 };
 

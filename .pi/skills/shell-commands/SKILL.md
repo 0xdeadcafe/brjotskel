@@ -21,7 +21,7 @@ Do NOT suggest uploading binaries to compromised endpoints unless specifically a
 
 **Allowed on target hosts**: Native OS binaries, built-in PowerShell modules, standard Unix utilities, tools already present on the system.
 
-**Allowed from harness**: Impacket, CrackMapExec/NetExec, proxychains, SSH, nmap — these run from the operator's container, not on the target.
+**Allowed from harness**: Impacket, NetExec (`netexec`), proxychains, SSH, nmap — these run from the operator's container, not on the target.
 
 **Exception — Active Pursuit & Eradication**: When following an attacker through the environment, the skill MAY generate offensive-style commands (credential harvesting, pivoting, tunnel establishment, persistence removal) using techniques documented in the offensive reference corpus. This is defensive use of offensive knowledge — pursuing the adversary to map and eliminate their presence.
 

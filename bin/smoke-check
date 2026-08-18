@@ -3,21 +3,81 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "[1/5] bash syntax"
-bash -n bin/ir-log
+step=1
+announce() {
+  echo "[$step/6] $*"
+  step=$((step + 1))
+}
 
-echo "[2/5] python syntax"
-python3 -m py_compile bin/intel-snippet
+announce "shell syntax"
+mapfile -t shell_scripts < <(
+  git ls-files | while IFS= read -r path; do
+    [[ -f "$path" ]] || continue
+    if [[ "$path" == *.sh ]]; then
+      printf '%s\n' "$path"
+      continue
+    fi
+    first_line=$(head -n 1 "$path" 2>/dev/null || true)
+    if [[ "$first_line" =~ ^#!.*(ba|z|k)?sh ]]; then
+      printf '%s\n' "$path"
+    fi
+  done | sort -u
+)
+for script in "${shell_scripts[@]}"; do
+  bash -n "$script"
+done
 
-echo "[3/5] extension syntax"
-node --check .pi/extensions/intel-store.ts >/dev/null
-node --check .pi/extensions/remote-session.ts >/dev/null
+announce "python syntax"
+mapfile -t python_scripts < <(
+  git ls-files | while IFS= read -r path; do
+    [[ -f "$path" ]] || continue
+    if [[ "$path" == *.py ]]; then
+      printf '%s\n' "$path"
+      continue
+    fi
+    first_line=$(head -n 1 "$path" 2>/dev/null || true)
+    if [[ "$first_line" == '#!'*python* ]]; then
+      printf '%s\n' "$path"
+    fi
+  done | sort -u
+)
+if ((${#python_scripts[@]} > 0)); then
+  python3 -m py_compile "${python_scripts[@]}"
+fi
 
-echo "[4/5] removed auth-context references"
+announce "extension syntax"
+mapfile -t extension_scripts < <(git ls-files '.pi/extensions/*.ts' '.pi/extensions/lib/*.ts' | sort -u)
+for script in "${extension_scripts[@]}"; do
+  node --check "$script" >/dev/null
+done
+
+announce "PowerShell syntax"
+mapfile -t powershell_scripts < <(git ls-files '*.ps1' | sort -u)
+if command -v pwsh >/dev/null 2>&1; then
+  for script in "${powershell_scripts[@]}"; do
+    pwsh -NoProfile -NonInteractive -Command '
+      $tokens = $null
+      $errors = $null
+      [System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors) | Out-Null
+      if ($errors.Count -gt 0) {
+        foreach ($err in $errors) { Write-Error ("{0}: {1}" -f $args[0], $err.Message) }
+        exit 1
+      }
+    ' "$script"
+  done
+else
+  echo "pwsh not found; skipping ${#powershell_scripts[@]} PowerShell script(s)"
+fi
+
+announce "banned-pattern checks"
 if rg -n "BRJOTSKEL_AUTH_CONTEXT|ensureAuthContext" .pi/extensions/remote-session.ts >/dev/null; then
   echo "Found deprecated auth-context reference(s)"
   exit 1
 fi
+if rg -n "crackmapexec|CrackMapExec" README.md docs .pi/extensions .pi/skills >/dev/null; then
+  echo "Found stale CrackMapExec references; use netexec consistently"
+  exit 1
+fi
 
-echo "[5/5] done"
+announce "done"
 echo "smoke-check: OK"

@@ -9,6 +9,7 @@
  *
  * Registered tools:
  *   intel_add        — Add a host, credential, account, or pivot entry
+ *   intel_update     — Merge updates into an existing intel entry
  *   intel_query      — Look up entries (e.g., "what creds work on db01?")
  *   intel_get_cred   — Retrieve a specific credential for use in remote_connect
  *   intel_timeline   — Append a timeline entry
@@ -18,42 +19,19 @@
  *   /intel           — Quick summary of intel store
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, chmodSync, readdirSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { normalizeIntelEntry, validateIntelEntry, resolveStoredPath, resolveIntelDir } from "./lib/intel-helpers.ts";
-import { getFileMap, getCollectionKeyMap, addIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary } from "./lib/intel-store-core.ts";
+import { normalizeIntelEntry, validateIntelEntry, validateIntelStatusTransition, resolveStoredPath, resolveIntelDir } from "./lib/intel-helpers.ts";
+import { ensurePrivateDir, ensurePrivateFile, hardenExistingPrivateFiles } from "./lib/intel-permissions.ts";
+import { parseYaml as parseYamlDocument, dumpYaml } from "./lib/simple-yaml.ts";
+import { getFileMap, getCollectionKeyMap, addIntelRecord, updateIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary, isInactiveCredentialStatus, timelineActionForIntelUpdate } from "./lib/intel-store-core.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // -------------------------------------------------------------------
 // Paths
 // -------------------------------------------------------------------
-
-function ensurePrivateDir(dirPath: string): void {
-  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-  try { chmodSync(dirPath, 0o700); } catch { /* ignore chmod failures on non-POSIX mounts */ }
-}
-
-function ensurePrivateFile(filePath: string): void {
-  try { if (existsSync(filePath)) chmodSync(filePath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
-}
-
-function hardenExistingPrivateFiles(dirPath: string, depth = 2): void {
-  if (depth < 0) return;
-  try {
-    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-      const entryPath = join(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        ensurePrivateDir(entryPath);
-        hardenExistingPrivateFiles(entryPath, depth - 1);
-      } else if (entry.isFile()) {
-        ensurePrivateFile(entryPath);
-      }
-    }
-  } catch { /* ignore unreadable/private-store migration failures */ }
-}
 
 function getIntelDir(): string {
   const base = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
@@ -65,19 +43,13 @@ function getIntelDir(): string {
   for (const fileName of ["hosts.yaml", "credentials.yaml", "accounts.yaml", "pivots.yaml", "timeline.yaml"]) {
     ensurePrivateFile(join(base, fileName));
   }
-  hardenExistingPrivateFiles(keysDir);
-  hardenExistingPrivateFiles(lootDir);
+  hardenExistingPrivateFiles(base, 4);
   return base;
 }
 
 function parseYaml(content: string, source = "input"): any {
   try {
-    const result = execSync(`python3 -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(sys.stdin.read()) or {}))"`, {
-      input: content,
-      encoding: "utf-8",
-      timeout: 5000,
-    });
-    return JSON.parse(result);
+    return parseYamlDocument(content) || {};
   } catch (err: any) {
     throw new Error(`Failed to parse YAML from ${source}: ${err.message}`);
   }
@@ -91,19 +63,14 @@ function readYaml(filePath: string): any {
 
 function writeYaml(filePath: string, data: any): void {
   try {
-    const json = JSON.stringify(data);
-    const yaml = execSync(`python3 -c "import yaml,json,sys; data=json.loads(sys.stdin.read()); print(yaml.dump(data, default_flow_style=False, sort_keys=False))"`, {
-      input: json,
-      encoding: "utf-8",
-      timeout: 5000,
-    });
+    const yaml = dumpYaml(data);
     const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(tempPath, yaml, { mode: 0o600 });
-    try { chmodSync(tempPath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
+    ensurePrivateFile(tempPath);
     renameSync(tempPath, filePath);
-    try { chmodSync(filePath, 0o600); } catch { /* ignore chmod failures on non-POSIX mounts */ }
+    ensurePrivateFile(filePath);
   } catch (err: any) {
-    throw new Error(`Failed to write YAML: ${err.message}`);
+    throw new Error(`Failed to write YAML to ${filePath}: ${err.message}`);
   }
 }
 
@@ -138,8 +105,10 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Record a discovered host, credential, account, or pivot path",
     promptGuidelines: [
       "Use intel_add immediately when discovering new hosts, credentials, or accounts during investigation.",
-      "Always include source information (which host it came from, how it was found).",
+      "Always include source.method, plus source.host/source.path when available, so provenance is preserved.",
+      "Use documented status/type values; validation errors list allowed enums and missing required fields.",
       "For credentials: specify valid_on hosts where the credential has been confirmed working.",
+      "Duplicate IDs are refused by default; prefer intel_update for lifecycle changes and set overwrite=true only when intentionally replacing an entry.",
       "intel_add auto-appends a timeline entry — no need to call intel_timeline separately.",
     ],
     parameters: Type.Object({
@@ -147,6 +116,7 @@ export default function (pi: ExtensionAPI) {
       id: Type.String({ description: "Unique identifier (e.g., 'web01', 'admin-ntlm', 'corp\\\\admin', 'to-dc01')" }),
       data: Type.String({ description: "YAML-formatted entry data (follows the schema in the respective intel file)" }),
       summary: Type.Optional(Type.String({ description: "One-line summary for the timeline entry" })),
+      overwrite: Type.Optional(Type.Boolean({ description: "Allow replacing an existing entry with the same ID (default: false)" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -159,15 +129,16 @@ export default function (pi: ExtensionAPI) {
 
       const total = await withIntelWriteLock(async () => {
         const store = readYaml(filePath);
-        const updatedStore = addIntelRecord(store, key, params.id, entryData);
+        const updatedStore = addIntelRecord(store, key, params.id, entryData, { overwrite: params.overwrite === true });
         writeYaml(filePath, updatedStore);
 
+        const action = params.overwrite === true ? "updated" : "discovered";
         appendTimeline(intelDir, {
           timestamp: new Date().toISOString(),
           type: params.category,
-          action: "discovered",
+          action,
           target: params.id,
-          summary: params.summary || `Added ${params.category}: ${params.id}`,
+          summary: params.summary || `${params.overwrite === true ? "Updated" : "Added"} ${params.category}: ${params.id}`,
           operator: process.env.USER || "unknown",
         });
 
@@ -175,8 +146,86 @@ export default function (pi: ExtensionAPI) {
       });
 
       return {
-        content: [{ type: "text", text: `Added ${params.category} '${params.id}' to intel store.\nFile: ${filePath}\nTotal ${key}: ${total}` }],
+        content: [{ type: "text", text: `${params.overwrite === true ? "Updated" : "Added"} ${params.category} '${params.id}' in intel store.\nFile: ${filePath}\nTotal ${key}: ${total}` }],
         details: { category: params.category, id: params.id, file: filePath },
+      };
+    },
+  });
+
+  // -------------------------------------------------------------------
+  // Tool: intel_update
+  // -------------------------------------------------------------------
+  pi.registerTool({
+    name: "intel_update",
+    label: "Intel Update",
+    description: "Safely merge updates into an existing intel entry, validate lifecycle/status transitions, and append a timeline entry.",
+    promptSnippet: "Update intel entry fields or lifecycle status with automatic timeline logging",
+    promptGuidelines: [
+      "Use intel_update for lifecycle changes such as host contained/cleared, credential rotated/revoked, account disabled, or pivot cleared.",
+      "fields is a YAML object containing only the fields to merge into the existing entry.",
+      "Arrays are union-merged by default; set replace_arrays=true only when intentionally replacing a list.",
+      "Credential terminal statuses (rotated/expired/revoked/disabled/inactive/invalid) are not reactivated without force=true; prefer a new credential ID for replacement secrets.",
+      "intel_update auto-appends a timeline entry — no need to call intel_timeline separately.",
+    ],
+    parameters: Type.Object({
+      category: StringEnum(["host", "credential", "account", "pivot"] as const),
+      id: Type.String({ description: "Existing intel entry ID to update" }),
+      fields: Type.String({ description: "YAML-formatted partial fields to merge into the existing entry" }),
+      summary: Type.Optional(Type.String({ description: "One-line summary for the timeline entry" })),
+      replace_arrays: Type.Optional(Type.Boolean({ description: "Replace arrays instead of union-merging them (default: false)" })),
+      force: Type.Optional(Type.Boolean({ description: "Allow otherwise discouraged lifecycle correction transitions (default: false)" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const intelDir = getIntelDir();
+      const filePath = join(intelDir, getFileMap()[params.category]);
+      const key = getCollectionKeyMap()[params.category];
+      const rawUpdates = parseYaml(params.fields, `intel_update:${params.category}:${params.id}`);
+      if (!rawUpdates || typeof rawUpdates !== "object" || Array.isArray(rawUpdates) || Object.keys(rawUpdates).length === 0) {
+        throw new Error("intel_update fields must be a non-empty YAML object/map.");
+      }
+      const updates = normalizeIntelEntry(params.category, rawUpdates, { partial: true });
+
+      const result = await withIntelWriteLock(async () => {
+        const store = readYaml(filePath);
+        const existing = store[key]?.[params.id];
+        if (!existing) throw new Error(`Intel entry '${params.id}' not found in '${key}'. Use intel_add for new entries.`);
+
+        const previousStatus = existing.status;
+        const updatedStore = updateIntelRecord(store, key, params.id, updates, { replaceArrays: params.replace_arrays === true });
+        const mergedEntry = normalizeIntelEntry(params.category, updatedStore[key][params.id]);
+        const statusChanged = updates.status !== undefined && String(previousStatus || "").trim().toLowerCase() !== String(mergedEntry.status || "").trim().toLowerCase();
+        if (statusChanged) {
+          validateIntelStatusTransition(params.category, previousStatus, mergedEntry.status, { force: params.force === true });
+        }
+        validateIntelEntry(params.category, mergedEntry);
+        updatedStore[key][params.id] = mergedEntry;
+        writeYaml(filePath, updatedStore);
+
+        const action = statusChanged ? timelineActionForIntelUpdate(params.category, mergedEntry.status) : "updated";
+        appendTimeline(intelDir, {
+          timestamp: new Date().toISOString(),
+          type: params.category,
+          action,
+          target: params.id,
+          summary: params.summary || `Updated ${params.category}: ${params.id}`,
+          operator: process.env.USER || "unknown",
+        });
+
+        return {
+          fieldNames: Object.keys(rawUpdates),
+          previousStatus,
+          currentStatus: mergedEntry.status,
+          action,
+        };
+      });
+
+      const statusLine = result.previousStatus !== result.currentStatus
+        ? `\nStatus: ${result.previousStatus || "(unset)"} → ${result.currentStatus || "(unset)"}`
+        : "";
+      return {
+        content: [{ type: "text", text: `Updated ${params.category} '${params.id}' in intel store.\nFile: ${filePath}\nMerged fields: ${result.fieldNames.join(", ")}${statusLine}\nTimeline action: ${result.action}` }],
+        details: { category: params.category, id: params.id, file: filePath, fields: result.fieldNames, action: result.action },
       };
     },
   });
@@ -278,6 +327,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Get a credential's secret (password/hash/key path) for authentication",
     promptGuidelines: [
       "Use intel_get_cred to retrieve credentials before using them in remote_connect or command-line tools.",
+      "Secrets for rotated, expired, revoked, disabled, inactive, or invalid credentials are refused.",
       "For SSH keys: the returned key_file path can be passed to remote_connect's identity parameter.",
       "For NTLM hashes: use with Impacket tools (secretsdump.py -hashes :HASH ...).",
     ],
@@ -293,6 +343,10 @@ export default function (pi: ExtensionAPI) {
       if (!cred) {
         const available = Object.keys(credentials).join(", ");
         throw new Error(`Credential '${params.id}' not found. Available: ${available || "none"}`);
+      }
+
+      if (isInactiveCredentialStatus(cred.status)) {
+        throw new Error(`Credential '${params.id}' has inactive status '${cred.status}'. Refusing to retrieve secret; rotate/validate or update the intel entry before operational use.`);
       }
 
       const lines: string[] = [
@@ -340,9 +394,9 @@ export default function (pi: ExtensionAPI) {
         appendTimeline(intelDir, {
           timestamp: new Date().toISOString(),
           type: "credential",
-          action: "confirmed",
+          action: "accessed",
           target: params.id,
-          summary: `Credential secret retrieved for operational use: ${params.id}`,
+          summary: `Credential secret accessed for operational use: ${params.id}`,
           operator: process.env.USER || "unknown",
         });
       });
@@ -365,7 +419,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       action: StringEnum(["add", "view"] as const),
       entry_type: Type.Optional(StringEnum(["host", "credential", "account", "persistence", "c2", "pivot", "eradication", "containment"] as const)),
-      entry_action: Type.Optional(StringEnum(["discovered", "confirmed", "eradicated", "rotated", "contained", "cleared"] as const)),
+      entry_action: Type.Optional(StringEnum(["discovered", "confirmed", "accessed", "updated", "eradicated", "rotated", "contained", "cleared"] as const)),
       target: Type.Optional(Type.String({ description: "What this entry is about" })),
       summary: Type.Optional(Type.String({ description: "One-line summary" })),
       count: Type.Optional(Type.Number({ description: "Number of recent entries to show (default: 20)" })),

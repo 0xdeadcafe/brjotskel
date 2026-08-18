@@ -173,6 +173,8 @@ Example account update:
 
 ```text
 intel_add(category="account", id="corp\\backupsvc", data="type: domain-user
+username: backupsvc
+domain: corp.local
 status: compromised
 access_to:
   - db01

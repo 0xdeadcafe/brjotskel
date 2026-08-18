@@ -76,7 +76,7 @@ remote_exec(session="dc01", command="reg save HKLM\\SAM C:\\temp\\sam.hiv")
 
 Record every find:
 ```text
-intel_add(category="credential", id="admin-hash", data="type: ntlm-hash\nusername: admin\nsecret: aad3b...\nvalid_on:\n  - dc01\nsource:\n  host: web01\n  method: secretsdump", summary="Admin NTLM from web01")
+intel_add(category="credential", id="admin-hash", data="type: ntlm-hash\nusername: admin\nsecret: aad3b...\nstatus: active\nvalid_on:\n  - dc01\nsource:\n  host: web01\n  method: secretsdump", summary="Admin NTLM from web01")
 ```
 
 ### Validation from harness
@@ -117,7 +117,7 @@ remote_tunnel(type="local", via="root@web01", local_port=44450, remote_host="dc0
 
 ### Track the graph
 ```text
-intel_add(category="pivot", id="to-sql01", data="target: sql01\nchain:\n  - hop: dc01\n    method: netsh-portproxy\nstatus: confirmed")
+intel_add(category="pivot", id="to-sql01", data="target: sql01\nchain:\n  - hop: dc01\n    method: netsh-portproxy\nstatus: confirmed\nsource:\n  host: dc01\n  method: netsh portproxy relay setup")
 intel_query(query_type="all_pivots")
 intel_summary()
 ```
@@ -176,7 +176,7 @@ Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Bloc
 
 ### Record containment
 ```text
-intel_timeline(action="add", entry_type="containment", entry_action="contained", target="web01", summary="Blocked C2 185.x.x.x, killed PID 4523")
+intel_update(category="host", id="web01", fields="status: contained\nnotes: Blocked C2 185.x.x.x, killed PID 4523", summary="web01 contained")
 ```
 
 ---
@@ -222,7 +222,7 @@ All credentials recovered during the investigation must be rotated:
 ```text
 intel_query(query_type="all_credentials")
 # For each: coordinate rotation with identity team
-intel_timeline(action="add", entry_type="credential", entry_action="rotated", target="admin-hash", summary="Password reset forced by identity team")
+intel_update(category="credential", id="admin-hash", fields="status: rotated", summary="Password reset forced by identity team")
 ```
 
 ---
@@ -251,7 +251,7 @@ Get-NetFirewallRule -DisplayName "Block C2" | Get-NetFirewallAddressFilter
 
 Record:
 ```text
-intel_timeline(action="add", entry_type="eradication", entry_action="cleared", target="web01", summary="All persistence removed, C2 blocked, credentials rotated, re-triage clean")
+intel_update(category="host", id="web01", fields="status: cleared\nnotes: All persistence removed, C2 blocked, credentials rotated, re-triage clean", summary="web01 cleared after re-triage")
 ```
 
 ---
@@ -265,10 +265,11 @@ intel_timeline(action="add", entry_type="eradication", entry_action="cleared", t
 | SSH tunnel / SOCKS | `remote_tunnel` |
 | Relay through non-SSH pivot | `remote_relay` |
 | Record finding | `intel_add` |
+| Update lifecycle/status | `intel_update` |
 | Find creds for a host | `intel_query(query_type="for_host", target="...")` |
 | Get password/hash for use | `intel_get_cred(id="...")` |
 | See the big picture | `intel_summary` |
-| Record action | `intel_timeline(action="add", ...)` |
+| Record standalone action | `intel_timeline(action="add", ...)` |
 | List active connections | `remote_sessions` |
 | Scan network segment | `nmap -Pn -sT --open -p 22,445,3389,5985 <target>` |
 | Validate creds at scale | `netexec smb <range> -u <user> -H <hash>` |

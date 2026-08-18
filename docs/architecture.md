@@ -20,7 +20,7 @@ Tools include:
 - OpenSSH client (pivoting, tunneling, key-based access)
 - PowerShell 7 (remote Windows administration)
 - Impacket suite (PsExec, WMIExec, SMBExec, secretsdump, ntlmrelayx)
-- CrackMapExec / NetExec (credential validation, lateral movement)
+- NetExec (credential validation, lateral movement)
 - proxychains4 (SOCKS proxying through pivot chains)
 - nmap / ncat / nc (reconnaissance and relay)
 - Standard Unix utilities
@@ -31,7 +31,7 @@ During active incidents, track discovered hosts in `workspace/`, for example `wo
 
 ### Tools
 
-All tools (`ssh`, `nmap`, `secretsdump.py`, `crackmapexec`, etc.) are used directly. No allowlist gates.
+All tools (`ssh`, `nmap`, `secretsdump.py`, `netexec`, etc.) are used directly. No allowlist gates.
 
 `bin/ir-log` is a minimal audit utility that appends timestamped entries to `logs/audit-YYYYMMDD.log` and records local execution context such as host, operator, and optional auth context.
 
@@ -85,7 +85,7 @@ During extension/skill development, also mount host `.pi/` to `/opt/brjotskel/.p
 - macOS: SSH and native shell commands, plus gather playbooks for `launchd`, keychain metadata, Wi-Fi preferences, autologin checks, FileVault/SIP state, and user persistence artifacts.
 - Windows: PowerShell 7, PowerShell Remoting, WMI, SMB, RDP, or OpenSSH.
 - Cisco/Juniper: SSH to device CLI or approved automation interfaces.
-- Active Directory: Impacket, CrackMapExec for credential validation and lateral movement mapping.
+- Active Directory: Impacket, NetExec for credential validation and lateral movement mapping.
 
 ## Proxy & Pivot Strategy
 

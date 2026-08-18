@@ -29,3 +29,6 @@ jobs:
 
       - name: Run tests
         run: bash bin/test
+
+      - name: Docker build smoke
+        run: docker build -t brjotskel:ci .

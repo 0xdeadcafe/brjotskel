@@ -4,24 +4,41 @@
 .github
 
 # Local secrets / operator state
-.env
-.env.*
+.env*
+logs/
 logs/**
+workspace/
 workspace/**
+intel/
 intel/**
 
 # Local reference clones and scratch data
+temp/
 temp/**
 
 # pi local package cache/state; image runs pi install during build
+.pi/npm/
 .pi/npm/**
 
 # Dependency/cache noise
+node_modules/
 node_modules/**
+**/node_modules/
+**/node_modules/**
+.npm/
 .npm/**
+**/.npm/
+**/.npm/**
+__pycache__/
 __pycache__/**
+**/__pycache__/
+**/__pycache__/**
 *.pyc
+**/*.pyc
+.pytest_cache/
 .pytest_cache/**
+**/.pytest_cache/
+**/.pytest_cache/**
 .coverage
 
 # Editor / OS noise

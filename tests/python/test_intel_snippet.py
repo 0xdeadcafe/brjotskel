@@ -26,6 +26,17 @@ def extract_yaml_block(output: str) -> str:
     return output[start:end].strip() + "\n"
 
 
+def extract_intel_add_kwargs(output: str) -> dict:
+    call = output.split("=== intel_add ===", 1)[1].strip()
+    captured = {}
+
+    def intel_add(**kwargs):
+        captured.update(kwargs)
+
+    exec(call, {"intel_add": intel_add}, {})
+    return captured
+
+
 class IntelSnippetTests(unittest.TestCase):
     def test_host_endpoint_omits_empty_fields(self):
         output = run_snippet(
@@ -113,6 +124,26 @@ class IntelSnippetTests(unittest.TestCase):
 
         self.assertIn('intel_add(category="pivot", id="to-vpn-gw"', output)
         self.assertIn("VPN endpoint vpn.corp.local:1194", output)
+
+    def test_stringy_secrets_and_summary_are_safe(self):
+        output = run_snippet(
+            "credential",
+            "--id", "strange\\id\"42",
+            "--type", "password",
+            "--username", "svc",
+            "--secret", "true",
+            "--notes", "1234\nnull\n2026-08-18",
+            "--summary", "quoted \"summary\" with \\ slash\nand newline",
+        )
+        data = yaml.safe_load(extract_yaml_block(output))
+        kwargs = extract_intel_add_kwargs(output)
+
+        self.assertEqual(data["secret"], "true")
+        self.assertEqual(data["notes"], "1234\nnull\n2026-08-18")
+        self.assertEqual(kwargs["category"], "credential")
+        self.assertEqual(kwargs["id"], "strange\\id\"42")
+        self.assertEqual(kwargs["summary"], "quoted \"summary\" with \\ slash\nand newline")
+        self.assertEqual(yaml.safe_load(kwargs["data"])["secret"], "true")
 
 
 if __name__ == "__main__":

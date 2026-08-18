@@ -2,7 +2,7 @@
 
 ## Review snapshot
 
-- Validation run: `bash bin/test` ✅ (smoke check, Python unit tests, Node helper tests all pass).
+- Validation run: `bash bin/test` ✅ (smoke check, Python unit tests, Node helper/extension tests all pass). Docker smoke build: `docker build -t brjotskel:p2-17-14-15-smoke .` ✅.
 - Tracked repo size is small (~864 KB). Local bloat/secrets live in ignored state (`temp/`, `.env`, `.pi/npm/`, `workspace/intel/`) and are now excluded from Docker build context via `.dockerignore`.
 - This replaces the prior stale review. Confirmed non-issues: `.env`, `temp/`, `workspace/intel/`, and `__pycache__/` are **not tracked** by git.
 
@@ -43,74 +43,86 @@
 
 ## 🟠 P1 — Important reliability / correctness work
 
-### 5. Make NetExec availability deterministic and standardize command names
+### 5. ✅ Make NetExec availability deterministic and standardize command names
 - **Files:** `Dockerfile`, `README.md`, `docs/**`, `.pi/extensions/lib/remote-session-core.ts`, `.pi/skills/shell-commands/reference/**`
 - **Issue:** Docker silently ignores NetExec install failures (`|| echo 'NetExec install skipped'`) while docs claim NetExec is included. References mix `netexec`, `crackmapexec`, and no `nxc` fallback.
 - **Action:** Fail the build if required NetExec install fails, or document it as optional. Add a smoke check for the installed command name and standardize examples (`netexec` vs `nxc`; remove stale `crackmapexec` references unless actually installed).
+- **Status:** ✅ Addressed. Docker now fails if NetExec does not install, installs transient build/Rust tooling needed for NetExec wheels, aliases upstream `nxc` to `netexec` when needed, verifies the command, and docs/skills/extensions use `netexec` consistently.
 
-### 6. Replace fragile YAML/string generation in `intel-snippet`
+### 6. ✅ Replace fragile YAML/string generation in `intel-snippet`
 - **File:** `bin/intel-snippet`
 - **Issues:** Custom `y()` serializer can type-shift strings such as `true`, `null`, numbers, or timestamps into non-strings, and has incomplete YAML edge-case handling. The emitted `intel_add(... summary="...")` call does not escape quotes, backslashes, or newlines in `summary` / IDs / YAML triple-quote boundaries.
 - **Action:** Use PyYAML for YAML output and `json.dumps()` for Python-string-safe `category`, `id`, `data`, and `summary` arguments. Add tests for secrets like `true`, `1234`, multiline notes, quotes, and summaries with `"`.
+- **Status:** ✅ Addressed. `intel-snippet` now emits quoted PyYAML strings and JSON-safe `intel_add(...)` arguments with regression coverage for string-like secrets, multiline notes, quotes, backslashes, and newlines.
 
-### 7. Prevent silent intel overwrites
+### 7. ✅ Prevent silent intel overwrites
 - **Files:** `.pi/extensions/lib/intel-store-core.ts`, `.pi/extensions/intel-store.ts`
 - **Issue:** `intel_add` overwrites an existing entry with the same ID without warning, which can destroy provenance during an incident.
 - **Action:** Default to error on duplicate IDs. Add explicit `overwrite: true` or an `intel_update` merge tool that appends a timeline event and preserves previous source/history.
+- **Status:** ✅ Addressed. `intel_add` now refuses duplicate IDs unless `overwrite=true` is explicitly supplied, and overwrite events are logged as `updated`.
 
-### 8. Fix misleading credential timeline semantics
+### 8. ✅ Fix misleading credential timeline semantics
 - **File:** `.pi/extensions/intel-store.ts`
 - **Issue:** `intel_get_cred` appends a `credential/confirmed` timeline entry whenever a secret is retrieved. Retrieval is not validation and can pollute the incident timeline with false confirmations.
 - **Action:** Use a distinct action such as `retrieved`/`accessed`, or log retrieval separately. Warn or refuse when credential status is `rotated`, `expired`, `revoked`, or otherwise inactive.
+- **Status:** ✅ Addressed. Credential retrieval now logs `credential/accessed`, and secrets for rotated/expired/revoked/disabled/inactive credentials are refused.
 
-### 9. Expand CI beyond happy-path helper tests
+### 9. ✅ Expand CI beyond happy-path helper tests
 - **Files:** `.github/workflows/ci.yml`, `bin/smoke-check`, `tests/**`
 - **Current gap:** CI does not build the Docker image, does not import/register the actual extension entrypoints with a mocked pi API, does not syntax-check all shell scripts, and does not parse PowerShell scripts.
 - **Action:** Add: Docker build smoke test; all tracked shell scripts `bash -n`; PowerShell parser check when `pwsh` is available; extension import/registration tests with mocked `registerTool`; regression tests for quoting, relay validation, duplicate intel IDs, malformed YAML, and inactive credentials.
+- **Status:** ✅ Addressed. CI now includes a Docker build smoke step; `bin/smoke-check` syntax-checks tracked shell/Python/extension/PowerShell files and bans stale NetExec names; tests import/register actual extensions and cover duplicate IDs, inactive credentials, YAML errors, quoting, and relay validation.
 
-### 10. Handle remote command timeout recovery
+### 10. ✅ Handle remote command timeout recovery
 - **File:** `.pi/extensions/remote-session.ts`
 - **Issue:** On timeout, `execCommand()` clears the buffer and resolves with partial output, but the remote command may still be running. The next command can interleave with stale output or execute while the previous operation is still active.
 - **Action:** Mark the session `tainted` after timeout and require reconnect, or send interrupt (`Ctrl-C`) plus drain-to-prompt before accepting another command.
+- **Status:** ✅ Addressed. Marker-based SSH/WinRM command timeouts now mark the session tainted, surface that state in `remote_sessions`, and refuse follow-on commands until reconnect.
 
-### 11. Replace Python subprocess YAML parsing in the intel extension
+### 11. ✅ Replace Python subprocess YAML parsing in the intel extension
 - **File:** `.pi/extensions/intel-store.ts`
 - **Issue:** Every YAML read/write shells out to `python3` + PyYAML with `execSync` and a 5s timeout. This is slow, blocks the event loop, and adds a runtime dependency that tests do not exercise.
 - **Action:** Use a JS YAML library, or centralize YAML I/O with better errors. Add graceful handling for malformed/partially-written YAML (clear error with file path and recovery guidance; do not crash unrelated queries when possible).
+- **Status:** ✅ Addressed. Intel YAML I/O now uses an in-process JS parser/dumper with quoted string output, clear file/path error wrapping, backward coverage for PyYAML-style lists/multiline strings, and malformed YAML tests.
 
 ---
 
 ## 🟡 P2 — Moderate value / design cleanup
 
-### 12. Strengthen intel schema validation
+### 12. ✅ Strengthen intel schema validation
 - **Files:** `.pi/extensions/lib/intel-helpers.ts`, docs for intel schema
 - **Issue:** Hosts and accounts can be nearly empty; `source` is recommended in prompts but not enforced; credential types are free-form; statuses are inconsistent across docs/examples.
 - **Action:** Define category schemas with required fields, allowed status/type enums, and source requirements. Return actionable validation errors from `intel_add`.
+- **Status:** ✅ Addressed. `intel_add` now validates category-specific required fields, status/type enums, credential material, host locators, pivot chains, account usernames, and `source.method`. Schema docs and examples were updated.
 
-### 13. Add `intel_update` / status lifecycle operations
+### 13. ✅ Add `intel_update` / status lifecycle operations
 - **Files:** `.pi/extensions/intel-store.ts`, `.pi/extensions/lib/intel-store-core.ts`
 - **Issue:** Operators can add and query intel, but cannot safely mark a host contained, credential rotated, pivot cleared, or append validation results without editing YAML by hand.
 - **Action:** Add `intel_update(category, id, fields, summary)` with merge semantics, status transitions, and automatic timeline entries.
+- **Status:** ✅ Addressed. Added `intel_update` with YAML partial-field merges, union-merged arrays by default, optional `replace_arrays`, lifecycle timeline actions, validation of merged entries, and guarded credential reactivation unless `force=true`.
 
-### 14. Support password and ProxyJump options for `remote_tunnel`
+### 14. ✅ Support password and ProxyJump options for `remote_tunnel`
 - **File:** `.pi/extensions/remote-session.ts`
 - **Issue:** `remote_tunnel` supports `identity` but not password auth or ProxyJump chains, while `remote_connect` supports password and ProxyJump. Password-only pivots are common in incident response.
 - **Action:** Add `password` via `sshpass` and optional `proxy_jump` to `remote_tunnel`, matching `remote_connect` behavior.
+- **Status:** ✅ Addressed. `remote_tunnel` now accepts `password` and `proxy_jump`, uses `sshpass -e` when password auth is supplied, and shares tested SSH argument construction with helper code.
 
-### 15. Improve TCP/telnet target parsing and no-banner handling
+### 15. ✅ Improve TCP/telnet target parsing and no-banner handling
 - **File:** `.pi/extensions/remote-session.ts`
 - **Issue:** `target.split(":")` breaks IPv6 and ambiguous host:port strings. TCP/telnet sessions time out when a service accepts connections but sends no banner.
 - **Action:** Add a robust host/port parser and a connection-ready fallback for no-banner services, with clear best-effort warnings.
+- **Status:** ✅ Addressed. TCP/telnet targets now use a tested parser supporting `host:port`, `[IPv6]:port`, IPv6 literals with `port=`, and validated port ranges. TCP/telnet sessions now become best-effort ready when the socket remains open without a banner.
 
 ### 16. Make Docker builds reproducible and auditable
 - **File:** `Dockerfile`
 - **Issue:** Build pulls live NodeSource setup script, global pi latest, Impacket latest, and NetExec from GitHub HEAD. This is convenient but not reproducible and increases supply-chain risk.
 - **Action:** Pin versions/commits, document update cadence, and add image labels with tool versions.
 
-### 17. Align Docker image layout with docs
+### 17. ✅ Align Docker image layout with docs
 - **Files:** `Dockerfile`, `README.md`, `docs/intel-import-workflow.md`
 - **Issue:** Docker copies `ir-log` and `intel-snippet` to `/usr/local/bin`, but does not copy `bin/test` or `bin/smoke-check` into `/opt/brjotskel/bin`. Docs sometimes reference `bin/intel-snippet` as if the repo `bin/` exists inside the container.
 - **Action:** Either copy the full `bin/` directory into the image or update docs to use PATH commands inside the container and repo-relative commands outside it.
+- **Status:** ✅ Addressed. Docker now copies the full `bin/` directory into `/opt/brjotskel/bin`, preserves executable helper scripts, and symlinks `ir-log`/`intel-snippet` into `/usr/local/bin` for PATH usage.
 
 ### 18. Break up the `remote-session.ts` monolith
 - **File:** `.pi/extensions/remote-session.ts`
@@ -121,10 +133,11 @@
 
 ## 🟢 P3 — Cleanup / bloat / consistency
 
-### 19. Remove stale one-off checks from `smoke-check`
+### 19. ✅ Remove stale one-off checks from `smoke-check`
 - **File:** `bin/smoke-check`
 - **Issue:** Step `[4/5]` only greps for a past auth-context migration. This is not a general regression check.
 - **Action:** Replace with a generic banned-patterns file or delete once the migration is fully trusted.
+- **Status:** ✅ Addressed. `smoke-check` now has a generic banned-pattern phase covering deprecated auth-context references and stale CrackMapExec naming.
 
 ### 20. Reconcile stale planning docs with current state
 - **Files:** `TODO.md`, `docs/analyst-improvement-plan.md`, `README.md`
