@@ -55,15 +55,16 @@ announce "PowerShell syntax"
 mapfile -t powershell_scripts < <(git ls-files '*.ps1' | sort -u)
 if command -v pwsh >/dev/null 2>&1; then
   for script in "${powershell_scripts[@]}"; do
-    pwsh -NoProfile -NonInteractive -Command '
+    POWERSHELL_SYNTAX_PATH="$script" pwsh -NoProfile -NonInteractive -Command '
+      $path = $env:POWERSHELL_SYNTAX_PATH
       $tokens = $null
       $errors = $null
-      [System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors) | Out-Null
+      [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
       if ($errors.Count -gt 0) {
-        foreach ($err in $errors) { Write-Error ("{0}: {1}" -f $args[0], $err.Message) }
+        foreach ($err in $errors) { Write-Error ("{0}: {1}" -f $path, $err.Message) }
         exit 1
       }
-    ' "$script"
+    '
   done
 else
   echo "pwsh not found; skipping ${#powershell_scripts[@]} PowerShell script(s)"
