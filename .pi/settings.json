@@ -1,5 +1,8 @@
 {
   "packages": [
     "npm:pi-smart-fetch"
+  ],
+  "prompts": [
+    "prompts"
   ]
 }
