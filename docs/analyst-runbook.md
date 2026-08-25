@@ -1,6 +1,6 @@
 # Analyst Runbook
 
-Flexible workflow reference for experienced IR analysts. Not a step-by-step checklist — a map of capabilities and decision points.
+Operational reference for experienced IR analysts. Not a step-by-step checklist — a map of capabilities, commands, and decision points for active incidents.
 
 ## Phases
 
@@ -8,59 +8,113 @@ Flexible workflow reference for experienced IR analysts. Not a step-by-step chec
 LAND → ASSESS → PURSUE → CONTAIN → ERADICATE → VERIFY
 ```
 
-Phases overlap. You may contain one host while still pursuing on another.
+Phases overlap. You may be containing one host while still pursuing credentials on another. The intel store tracks state across phases so nothing gets lost between sessions.
+
+---
+
+## Starting cold
+
+When you're handed an incident with an IP, a credential, and an incident brief:
+
+```text
+# 1. Record what you know
+intel_add(category="host", id="web01",
+  data="ip: 10.10.10.5\nplatform: linux\nstatus: suspected\nsource:\n  method: incident brief",
+  summary="Initial suspected compromised host")
+
+# 2. Verify connectivity (from the harness)
+```
+```bash
+nmap -Pn -sT --open -p 22,80,443,445,3389,5985 10.10.10.5
+```
+```text
+# 3. Connect and get immediate situational awareness
+remote_connect(protocol="ssh", target="root@10.10.10.5", name="web01", password="...")
+/assess web01
+```
 
 ---
 
 ## Land
 
-Establish access to the first confirmed compromised host.
+### SSH
 
 ```text
 remote_connect(protocol="ssh", target="root@10.10.10.5", name="web01", password="...")
+remote_connect(protocol="ssh", target="deploy@10.10.20.10", name="db01",
+  identity="workspace/intel/keys/deploy-key")
 ```
 
-If SSH isn't available:
+### WinRM
+
 ```text
 remote_connect(protocol="winrm", target="administrator@10.10.10.20", name="dc01", password="...")
 ```
 
-If the target isn't directly reachable:
+### Target not directly reachable
+
 ```text
-remote_tunnel(type="local", via="root@jumpbox", local_port=2222, remote_host="target", remote_port=22)
-remote_connect(protocol="ssh", target="root@localhost", port=2222, name="target01")
+# SSH tunnel through a pivot
+remote_tunnel(type="local", via="root@web01", local_port=2222,
+  remote_host="internal", remote_port=22)
+remote_connect(protocol="ssh", target="root@localhost", port=2222, name="internal01")
+
+# Native relay when pivot has no SSH server
+remote_relay(session="dc01", target_host="10.10.30.10", target_port=22, listen_port=4422)
+remote_connect(protocol="ssh", target="user@10.10.10.20", port=4422, name="sql01")
 ```
 
-Record immediately:
+See [relay-pivoting.md](relay-pivoting.md) for the full decision tree.
+
+### Record the landing
+
 ```text
-intel_add(category="host", id="web01", data="...", summary="Initial compromised host")
+intel_add(category="host", id="web01",
+  data="ip: 10.10.10.5\nplatform: linux\nstatus: compromised\nsource:\n  method: authorized scope / initial landing",
+  summary="Initial foothold — confirmed compromised")
 ```
 
 ---
 
 ## Assess
 
-**First-look (30 seconds):**
+Type `/assess <session>` for platform-aware first-look commands. Or run manually:
+
+### First look — 30 seconds
+
+Answers: Am I alone? What's talking outbound right now? Any staging files? Immediate persistence?
+
 ```text
-remote_exec(session="web01", command="<linux/first-look.sh>")
+# Linux — read the script and run it inline on the session
+remote_exec(session="web01", command="<read and paste linux/first-look.sh>")
+
+# Windows
+remote_exec(session="dc01", command="<read and paste windows/first-look.ps1>")
+
+# macOS
+remote_exec(session="mac01", command="<read and paste macos/first-look.sh>")
 ```
 
-**Decision tree after first-look:**
+**Running playbooks:** Ask pi directly (`run linux/first-look.sh on web01`) and it will read the script and paste it inline. For larger scripts, use `remote_upload` to stage them to a temp path, run, then remove.
 
-| Finding | Action |
-|---------|--------|
-| Active attacker session/process | Decide: observe or contain immediately |
-| Outbound C2 connection | Note IP/port, decide containment timing |
-| Staging files in /tmp, /dev/shm | Hash + collect before removal |
-| Persistence mechanisms | Full persistence hunt before eradication |
-| Nothing obvious | Deeper triage — gather scripts |
+### After first look
 
-**Go deeper when needed:**
-- Credentials: `linux/hashdump.sh`, `linux/ssh-keys.sh`, `windows/enum-credentials.ps1`
-- Persistence: `linux/enum-persistence.sh`, `windows/persistence-hunt.ps1`
-- Network context: `linux/enum-network.sh`, `windows/enum-network.ps1`
-- Event history: `windows/eventlog-hunt.ps1`, `windows/sysmon-hunt.ps1`
-- AD scope: `windows/enum-ad.ps1`, `windows/enum-ad-users.ps1`
+| Finding | Response |
+|---------|----------|
+| Active attacker session or process | Decide: observe to map more, or contain immediately |
+| Outbound C2 connection | Note C2 IP and port; decide containment timing |
+| Staging files in `/tmp`, `/dev/shm`, `C:\Users\Public` | Hash and collect before touching |
+| Persistence mechanism present | Full persistence hunt before eradication |
+| Nothing obvious | Run deeper gather scripts |
+
+### Deeper triage
+
+- **Credentials**: `linux/hashdump.sh`, `linux/ssh-keys.sh`, `windows/enum-credentials.ps1`, `windows/psreadline-history.ps1`, `macos/enum-credentials.sh`
+- **Persistence**: `linux/enum-persistence.sh`, `windows/enum-persistence.ps1`, `macos/enum-persistence.sh`
+- **Network context**: `linux/enum-network.sh`, `windows/enum-network.ps1`, `macos/enum-network.sh`
+- **Event history**: `windows/eventlog-hunt.ps1`, `windows/sysmon-hunt.ps1`
+- **AD scope**: `windows/enum-ad.ps1`, `windows/enum-ad-users.ps1`, `windows/enum-ad-spns.ps1`
+- **Full triage**: `linux/triage.sh`, `windows/triage.ps1`
 
 ---
 
@@ -68,56 +122,106 @@ remote_exec(session="web01", command="<linux/first-look.sh>")
 
 Follow the credential trail. Every credential found → validate → pivot.
 
-### Credential recovery
-```text
-remote_exec(session="web01", command="cat /etc/shadow")
-remote_exec(session="dc01", command="reg save HKLM\\SAM C:\\temp\\sam.hiv")
+Type `/pursue` for a chase-board view of current intel and next actions.
+
+### Recover credentials
+
+```bash
+# Linux — shadow file and SSH keys
+remote_exec(session="web01", command="<linux/hashdump.sh>")
+remote_exec(session="web01", command="<linux/ssh-keys.sh>")
+remote_exec(session="web01", command="<linux/enum-credentials.sh>")
+
+# Windows — registry hives (requires admin)
+remote_exec(session="dc01",
+  command="reg save HKLM\\SAM C:\\Windows\\Temp\\s.hiv; reg save HKLM\\SYSTEM C:\\Windows\\Temp\\sy.hiv")
+# Then: secretsdump.py -sam s.hiv -system sy.hiv LOCAL
+
+# Windows — credential manager and PowerShell history
+remote_exec(session="dc01", command="<windows/enum-credentials.ps1>")
+remote_exec(session="dc01", command="<windows/psreadline-history.ps1>")
+
+# macOS — keychain metadata and SSH material
+remote_exec(session="mac01", command="<macos/enum-credentials.sh>")
 ```
 
-Record every find:
+### Record every find
+
 ```text
-intel_add(category="credential", id="admin-hash", data="type: ntlm-hash\nusername: admin\nsecret: aad3b...\nstatus: active\nvalid_on:\n  - dc01\nsource:\n  host: web01\n  method: secretsdump", summary="Admin NTLM from web01")
+# Password
+intel_add(category="credential", id="svc-sql-pass",
+  data="type: password\nusername: svc_sql\ndomain: corp.local\nsecret: Winter2024!\nstatus: active\nvalid_on:\n  - sql01\nsource:\n  host: dc01\n  method: psreadline history\n  playbook: windows/psreadline-history.ps1",
+  summary="svc_sql password from PSReadLine history on dc01")
+
+# NTLM hash
+intel_add(category="credential", id="admin-ntlm",
+  data="type: ntlm-hash\nusername: Administrator\ndomain: corp.local\nsecret: aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0\nstatus: active\nvalid_on:\n  - dc01\nsource:\n  host: dc01\n  method: secretsdump\n  playbook: windows/hashdump.ps1",
+  summary="Domain admin NTLM recovered from dc01")
+
+# SSH key
+intel_add(category="credential", id="deploy-key",
+  data="type: ssh-key\nusername: deploy\nkey_file: workspace/intel/keys/deploy-ed25519\nstatus: active\nvalid_on:\n  - web01\nsource:\n  host: web01\n  method: user SSH directory\n  path: /home/deploy/.ssh/id_ed25519\n  playbook: linux/ssh-keys.sh",
+  summary="deploy SSH key recovered from web01")
 ```
 
-### Validation from harness
+Use `bin/intel-snippet` to generate these payloads from structured gather output. See [intel-import-workflow.md](intel-import-workflow.md).
+
+### Validate from the harness
+
 ```bash
 # NTLM hash
-netexec smb 10.10.10.20 -u admin -H aad3b...
-netexec winrm 10.10.10.20 -u admin -H aad3b...
+netexec smb 10.10.10.0/24 -u Administrator -H aad3b435b51404eeaad3b435b51404ee:31d6... --no-bruteforce
+netexec winrm 10.10.10.20 -u Administrator -H aad3b435b51404eeaad3b435b51404ee:31d6...
 
 # Password
-netexec smb 10.10.10.0/24 -u svc_sql -p 'Password1' --no-bruteforce
+netexec smb 10.10.10.0/24 -u svc_sql -p 'Winter2024!' --no-bruteforce
 
 # SSH key
 ssh -o BatchMode=yes -i workspace/intel/keys/deploy-ed25519 deploy@10.10.20.10 exit
+
+# Via SOCKS proxy
+proxychains netexec smb 10.10.20.0/24 -u admin -H <hash>
+```
+
+### Remote credential dump
+
+```bash
+# From harness using a recovered hash
+secretsdump.py -hashes :31d6... corp.local/Administrator@10.10.10.20
+
+# Via SOCKS
+proxychains secretsdump.py -hashes :31d6... corp.local/Administrator@10.10.20.10
 ```
 
 ### Pivot when direct access is blocked
 
-**SSH tunnel (preferred):**
+**SSH tunnel (preferred when the pivot has SSH):**
+
 ```text
-remote_tunnel(type="dynamic", via="root@web01", local_port=1080, description="SOCKS via web01")
-# Then: proxychains netexec smb 10.10.20.0/24 -u admin -H hash
+remote_tunnel(type="dynamic", via="root@web01", local_port=1080)
+# Then: proxychains netexec smb 10.10.20.0/24 -u admin -H <hash>
+
+remote_tunnel(type="local", via="root@web01", local_port=5985,
+  remote_host="dc01", remote_port=5985)
+remote_connect(protocol="winrm", target="administrator@localhost", port=5985, name="dc01")
 ```
 
-**Relay when SSH isn't available on the pivot:**
+**Native relay (pivot has no SSH server):**
+
 ```text
 remote_relay(session="dc01", target_host="10.10.30.10", target_port=445, listen_port=44450)
-# Then: netexec smb 10.10.10.20 --port 44450 -u sa -H hash
+# Then: netexec smb 10.10.10.20 --port 44450 -u sa -H <hash>
 ```
 
-**Chain for deep networks:**
-```text
-# Harness → web01 (SSH) → dc01 (WinRM) → sql01 (SMB only)
-remote_tunnel(type="local", via="root@web01", local_port=5985, remote_host="dc01", remote_port=5985)
-remote_connect(protocol="winrm", target="administrator@localhost", port=5985, name="dc01")
-remote_relay(session="dc01", target_host="sql01", target_port=445, listen_port=44450)
-remote_tunnel(type="local", via="root@web01", local_port=44450, remote_host="dc01", remote_port=44450)
-```
+See [relay-pivoting.md](relay-pivoting.md) for the decision tree and multi-hop chaining.
 
-### Track the graph
+### Track the pivot graph
+
 ```text
-intel_add(category="pivot", id="to-sql01", data="target: sql01\nchain:\n  - hop: dc01\n    method: netsh-portproxy\nstatus: confirmed\nsource:\n  host: dc01\n  method: netsh portproxy relay setup")
+intel_add(category="pivot", id="to-dc01",
+  data="target: dc01\nchain:\n  - hop: web01\n    method: ssh-local-forward\nstatus: active\nsource:\n  method: SSH tunnel via web01",
+  summary="Reached dc01 via SSH tunnel through web01")
+
 intel_query(query_type="all_pivots")
 intel_summary()
 ```
@@ -126,29 +230,45 @@ intel_summary()
 
 ## Contain
 
-**Timing decision:** Contain when you've mapped enough of the attacker's footprint that they can't simply move to an unmapped host. Premature containment tips them off; late containment lets them dig deeper.
+**Timing:** Contain when you've mapped enough of the footprint that the attacker can't pivot to an unmapped host. Premature containment tips them off; late containment lets them dig deeper.
 
-### Process kill
+Type `/contain <session>` for an evidence-first containment command pack.
+
+### Kill the process
+
 ```bash
 # Linux
-kill -9 <pid>; ps aux | grep <name>
+kill -9 <pid>
+ps aux | grep <name>    # verify gone
 
 # Windows
-Stop-Process -Id <pid> -Force; Get-Process -Id <pid> -ErrorAction SilentlyContinue
+Stop-Process -Id <pid> -Force
+Get-Process -Id <pid> -ErrorAction SilentlyContinue    # should return nothing
+
+# macOS
+kill -9 <pid>
+pgrep -l <name>    # verify
 ```
 
 ### Block C2 IP
+
 ```bash
 # Linux
 iptables -I OUTPUT -d <c2_ip> -j DROP
-iptables -I INPUT -s <c2_ip> -j DROP
+iptables -I INPUT  -s <c2_ip> -j DROP
+iptables -L -n | grep <c2_ip>    # verify
 
 # Windows
-New-NetFirewallRule -DisplayName "Block C2" -Direction Outbound -RemoteAddress <c2_ip> -Action Block
-New-NetFirewallRule -DisplayName "Block C2 In" -Direction Inbound -RemoteAddress <c2_ip> -Action Block
+New-NetFirewallRule -DisplayName "Block C2 Out" -Direction Outbound -RemoteAddress <c2_ip> -Action Block
+New-NetFirewallRule -DisplayName "Block C2 In"  -Direction Inbound  -RemoteAddress <c2_ip> -Action Block
+
+# macOS
+echo "block drop from any to <c2_ip>\nblock drop from <c2_ip> to any" | pfctl -f -
+pfctl -sr | grep <c2_ip>    # verify
 ```
 
 ### Disable account
+
 ```bash
 # Linux
 usermod -L <user>; passwd -l <user>
@@ -158,15 +278,19 @@ net user <user> /active:no
 
 # Windows (AD)
 Disable-ADAccount -Identity <user>
+
+# macOS
+dscl . -passwd /Users/<user> '*'
 ```
 
-### Network isolation (nuclear option)
+### Network isolation — nuclear option
+
 ```bash
 # Linux — allow only analyst SSH, drop everything else
 iptables -F
-iptables -A INPUT -s <analyst_ip> -p tcp --dport 22 -j ACCEPT
+iptables -A INPUT  -s <analyst_ip> -p tcp --dport 22 -j ACCEPT
 iptables -A OUTPUT -d <analyst_ip> -p tcp --sport 22 -j ACCEPT
-iptables -A INPUT -j DROP
+iptables -A INPUT  -j DROP
 iptables -A OUTPUT -j DROP
 
 # Windows
@@ -175,132 +299,226 @@ Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Bloc
 ```
 
 ### Record containment
+
 ```text
-intel_update(category="host", id="web01", fields="status: contained\nnotes: Blocked C2 185.x.x.x, killed PID 4523", summary="web01 contained")
+intel_update(category="host", id="web01",
+  fields="status: contained\nnotes: Blocked C2 185.x.x.x, killed PID 4523, attacker session terminated",
+  summary="web01 contained")
 ```
 
 ---
 
 ## Eradicate
 
-Remove persistence only **after** documenting it.
+Remove persistence only **after** documenting it. Snapshot state first when feasible.
 
-### Common persistence removal
+Type `/eradicate <session>` for a guided workflow.
+
+### Linux
 
 ```bash
-# Linux cron
-crontab -r -u <user>  # or edit specific entry
-rm /etc/cron.d/<malicious>
+# Cron — document before removing
+crontab -l -u <user>
+crontab -r -u <user>    # full removal, or edit /var/spool/cron/crontabs/<user> for one entry
+rm /etc/cron.d/<malicious_file>
 
-# Linux systemd
+# systemd unit
 systemctl stop <unit>; systemctl disable <unit>; systemctl mask <unit>
-rm /etc/systemd/system/<unit>; systemctl daemon-reload
+rm /etc/systemd/system/<unit>.service; systemctl daemon-reload
 
-# Linux SSH keys
-# Edit /root/.ssh/authorized_keys — remove attacker's key
+# SSH authorized_keys — edit file, remove attacker key
+nano /root/.ssh/authorized_keys
 
-# Windows scheduled task
+# Shell profile hook
+rm /etc/profile.d/<malicious>.sh    # or edit and remove the specific lines
+```
+
+### Windows
+
+```powershell
+# Scheduled task — export evidence first
+Get-ScheduledTask -TaskName "<name>" | Export-Clixml "evidence-task.xml"
 Disable-ScheduledTask -TaskName "<name>"
 Unregister-ScheduledTask -TaskName "<name>" -Confirm:$false
 
-# Windows service
-Stop-Service "<name>"; Set-Service "<name>" -StartupType Disabled
-sc.exe delete "<name>"
+# Service — export evidence first
+Get-Service "<name>" | Export-Clixml "evidence-svc.xml"
+Stop-Service "<name>"; Set-Service "<name>" -StartupType Disabled; sc.exe delete "<name>"
 
-# Windows Run key
+# Registry Run key
+Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" | Export-Clixml "evidence-runkey.xml"
 Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "<name>"
 
-# Windows WMI
-Get-WmiObject -Class __FilterToConsumerBinding -Namespace root/subscription | Where-Object { $_.Filter -match "<name>" } | Remove-WmiObject
-Get-WmiObject -Class __EventFilter -Namespace root/subscription | Where-Object { $_.Name -match "<name>" } | Remove-WmiObject
-Get-WmiObject -Class CommandLineEventConsumer -Namespace root/subscription | Where-Object { $_.Name -match "<name>" } | Remove-WmiObject
+# WMI subscription (PowerShell 7)
+Get-CimInstance -Namespace root/subscription -ClassName __EventFilter |
+  Where-Object { $_.Name -match "<name>" } | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer |
+  Where-Object { $_.Name -match "<name>" } | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding |
+  Where-Object { $_.Filter.Name -match "<name>" } | Remove-CimInstance
+```
+
+### macOS
+
+```bash
+# LaunchDaemon / LaunchAgent
+launchctl bootout system /Library/LaunchDaemons/<name>.plist
+launchctl bootout gui/<uid> /Library/LaunchAgents/<name>.plist
+mv /Library/LaunchDaemons/<name>.plist /tmp/evidence-<name>.plist    # preserve evidence
+
+# Login items (macOS 13+)
+sfltool dumpbtm    # list registered items before removal
+osascript -e 'tell application "System Events" to delete login item "<name>"'
 ```
 
 ### Force credential rotation
 
-All credentials recovered during the investigation must be rotated:
 ```text
 intel_query(query_type="all_credentials")
-# For each: coordinate rotation with identity team
-intel_update(category="credential", id="admin-hash", fields="status: rotated", summary="Password reset forced by identity team")
+# Coordinate rotation of each active credential with your identity team, then record:
+intel_update(category="credential", id="admin-ntlm",
+  fields="status: rotated",
+  summary="Domain admin password reset by identity team")
 ```
 
 ---
 
 ## Verify
 
-Post-eradication checks — run first-look again plus targeted validation.
+Post-eradication checks. Re-run first-look then targeted verification.
+
+Type `/verify <session>` for a post-action check pack.
+
+### Persistence is gone
 
 ```bash
-# Verify persistence is gone
-systemctl list-units --type=service --state=running | grep <name>
-schtasks /query /tn "<name>" 2>&1
+# Linux
+systemctl list-units --type=service --state=running | grep -i <name>
+crontab -l -u <user> 2>/dev/null | grep <pattern>
 
-# Verify no C2 reconnection
-ss -tunap | grep ESTABLISHED
-Get-NetTCPConnection -State Established | Where-Object { $_.RemoteAddress -eq '<c2_ip>' }
+# Windows
+schtasks /query /tn "<name>" 2>&1    # expect: "ERROR: The system cannot find the file"
+Get-Service "<name>" -ErrorAction SilentlyContinue    # expect: no output
 
-# Verify account disabled
-id <user> 2>&1  # should fail
-net user <user> | findstr "active"
-
-# Verify firewall holds
-iptables -L -n | grep <c2_ip>
-Get-NetFirewallRule -DisplayName "Block C2" | Get-NetFirewallAddressFilter
+# macOS
+launchctl list | grep <name>
 ```
 
-Record:
+### No C2 reconnection
+
+```bash
+# Linux
+ss -tunap | grep ESTABLISHED | grep -v '<analyst_ip>'
+
+# Windows
+Get-NetTCPConnection -State Established |
+  Where-Object { $_.RemoteAddress -ne '<analyst_ip>' } |
+  Select-Object RemoteAddress, RemotePort, OwningProcess
+
+# macOS
+netstat -an | grep ESTABLISHED | grep -v '<analyst_ip>'
+```
+
+### Account is disabled
+
+```bash
+# Linux — check for '!' prefix in /etc/shadow
+getent shadow <user> | cut -d: -f2 | head -c1    # '!' means locked
+
+# Windows
+net user <user> | findstr /I "active"    # expect: "Account active: No"
+Get-ADUser -Identity <user> -Properties Enabled | Select-Object Name, Enabled
+
+# macOS
+dscl . -read /Users/<user> AuthenticationAuthority
+```
+
+### Firewall rule holds
+
+```bash
+# Linux
+iptables -L OUTPUT -n | grep <c2_ip>
+
+# Windows
+Get-NetFirewallRule -DisplayName "Block C2*" | Get-NetFirewallAddressFilter
+
+# macOS
+pfctl -sr | grep <c2_ip>
+```
+
+### Record cleared
+
 ```text
-intel_update(category="host", id="web01", fields="status: cleared\nnotes: All persistence removed, C2 blocked, credentials rotated, re-triage clean", summary="web01 cleared after re-triage")
+intel_update(category="host", id="web01",
+  fields="status: cleared\nnotes: Re-triage clean — persistence removed, C2 silent, credentials rotated",
+  summary="web01 cleared after full eradication")
 ```
 
 ---
 
-## Tool Quick Reference
+## Tool quick reference
 
 | Need | Tool |
 |------|------|
 | Connect to host | `remote_connect` |
-| Run command | `remote_exec` |
-| SSH tunnel / SOCKS | `remote_tunnel` |
-| Relay through non-SSH pivot | `remote_relay` |
-| Record finding | `intel_add` |
-| Update lifecycle/status | `intel_update` |
-| Find creds for a host | `intel_query(query_type="for_host", target="...")` |
-| Get password/hash for use | `intel_get_cred(id="...")` |
-| See the big picture | `intel_summary` |
-| Record standalone action | `intel_timeline(action="add", ...)` |
-| List active connections | `remote_sessions` |
-| Scan network segment | `nmap -Pn -sT --open -p 22,445,3389,5985 <target>` |
-| Validate creds at scale | `netexec smb <range> -u <user> -H <hash>` |
-| Dump remote creds | `secretsdump.py -hashes :<hash> <domain>/<user>@<host>` |
-| Get shell with hash | `psexec.py -hashes :<hash> <domain>/<user>@<host>` |
-| Route through pivot | `proxychains <tool>` (after dynamic SOCKS tunnel) |
+| Run a command on a session | `remote_exec` |
+| Upload a script to the target | `remote_upload` |
+| List active sessions and tunnels | `remote_sessions` |
+| Disconnect a session | `remote_disconnect` |
+| SSH tunnel or SOCKS proxy | `remote_tunnel` |
+| Close a tunnel | `remote_tunnel_close` |
+| TCP relay through a non-SSH pivot | `remote_relay` |
+| Close a relay | `remote_relay_close` |
+| Record a finding | `intel_add` |
+| Update lifecycle or status | `intel_update` |
+| Find credentials valid on a host | `intel_query(query_type="for_host", target="...")` |
+| Find hosts where a cred works | `intel_query(query_type="for_credential", target="...")` |
+| List all credentials | `intel_query(query_type="all_credentials")` |
+| Retrieve a password / hash / key path | `intel_get_cred(id="...")` |
+| Overview of all intel | `intel_summary` |
+| Record a standalone event | `intel_timeline(action="add", ...)` |
+| Log an operator action | `ir-log <description>` |
+| Scan a network segment | `nmap -Pn -sT --open -p 22,445,3389,5985 <target>` |
+| Validate credentials at scale | `netexec smb <range> -u <user> -H <hash> --no-bruteforce` |
+| Dump credentials remotely | `secretsdump.py -hashes :<hash> <domain>/<user>@<target>` |
+| Get a shell with a hash | `psexec.py -hashes :<hash> <domain>/<user>@<target>` |
+| Route tools through a pivot | `proxychains <tool>` (after `remote_tunnel(type="dynamic", ...)`) |
+| Generate an intel_add payload | `bin/intel-snippet <subcommand> ...` |
 
 ---
 
-## Decision Heuristics
+## Decision heuristics
 
-**When to go deeper vs. move on:**
-- Found credentials → always validate against other hosts before moving on
-- Found persistence but no credentials → look harder (attacker needed creds to get there)
-- Host is noisy/active → prioritize volatile collection before it changes
+### Go deeper vs. move on
 
-**When to contain:**
+- Found credentials → validate against all other known hosts before moving on
+- Found persistence but no credentials → look harder; the attacker needed creds to get there
+- Host is noisy or actively in use by attacker → prioritize volatile collection before state changes
+
+### When to contain
+
 - You've mapped the credential blast radius
-- Attacker is actively exfiltrating
-- You're confident they can't pivot somewhere unmapped
+- Attacker is actively exfiltrating or escalating
+- You're confident they can't pivot to an unmapped host
 - Incident commander says go
 
-**When to relay vs. tunnel:**
-- Pivot has SSH → `remote_tunnel`
-- Pivot is Windows without SSH → `remote_relay` (netsh portproxy)
-- Pivot is Linux without SSH → `remote_relay` (socat/ncat)
-- Need to route many tools → dynamic SOCKS tunnel
+### Pivot method selection
 
-**When to use the harness vs. native commands on target:**
-- Credential validation → from harness (netexec, secretsdump)
-- Credential dumping → on target (reg save, cat /etc/shadow)
-- Network scanning → from harness through SOCKS
-- Process/session kill → on target
-- Firewall rules → on target
+| Situation | Method |
+|-----------|--------|
+| Target directly reachable | `remote_connect` directly |
+| Pivot has SSH; one service (WinRM, SMB, RDP) | `remote_tunnel(type="local")` |
+| Pivot has SSH; routing many tools | `remote_tunnel(type="dynamic")` + proxychains |
+| Pivot is Windows without SSH | `remote_relay(method="netsh-portproxy")` |
+| Pivot is Linux without SSH | `remote_relay` — socat or ncat |
+
+### Where to run tools
+
+| Task | Run from |
+|------|---------|
+| Credential validation (`netexec`, `secretsdump`) | Harness |
+| Credential dumping (`reg save`, `cat /etc/shadow`) | On target |
+| Network scanning | Harness (through SOCKS if needed) |
+| Process or session kill | On target |
+| Firewall rules | On target |
+| Binary execution | Harness only — never drop tools on targets |

@@ -1,20 +1,49 @@
-# Intel Import Workflow
+# Intel Store
 
-Use gather-playbook findings to create normalized `intel_add(...)` entries with provenance.
+Tracks every host, credential, pivot path, and account discovered during an investigation. Stored as YAML in `workspace/intel/` — persists across container restarts and is queryable at any point in the incident.
 
-## Helper
+## Four categories
 
-- `bin/intel-snippet`
+| Category | What it tracks | Lifecycle |
+|----------|---------------|-----------|
+| `host` | Compromised systems, suspected targets, discovered endpoints | `suspected` → `compromised` → `contained` → `cleared` |
+| `credential` | Passwords, NTLM hashes, SSH keys, tokens, Kerberos tickets | `unvalidated` → `active` → `rotated` |
+| `account` | Domain and local accounts encountered during investigation | `suspected` → `compromised` → `disabled` |
+| `pivot` | Access paths from harness through the network to each target | `suspected` → `confirmed` → `active` → `cleared` |
 
-It prints:
-- YAML for the entry
-- a ready-to-paste `intel_add(...)` call
+Every entry requires a `source.method` field so findings can be traced back to the playbook or command that found them.
 
-## Common patterns
+---
 
-### Fast templates for specific playbooks
+## Recording findings
 
-#### PuTTY saved session → host
+Three paths — use whichever fits the moment:
+
+### 1. Direct intel_add (fastest)
+
+```text
+intel_add(category="host", id="db01",
+  data="ip: 10.10.20.10\nplatform: linux\nstatus: suspected\nsource:\n  host: web01\n  method: ansible inventory\n  path: /etc/ansible/hosts\n  playbook: linux/ansible-triage.sh",
+  summary="db01 found in Ansible inventory on web01")
+```
+
+### 2. bin/intel-snippet (for structured artifact types)
+
+Generates normalized YAML and a ready-to-paste `intel_add(...)` call. Use when the source is a specific artifact type — PuTTY session, PSReadLine hit, DNS cache entry, etc.
+
+```bash
+bin/intel-snippet <subcommand> [options]
+```
+
+### 3. Ask pi
+
+Describe the finding: *"Record db01 at 10.10.20.10, found in the Ansible inventory on web01"*. Pi generates and executes the call.
+
+---
+
+## intel-snippet templates
+
+### PuTTY saved session → host
 
 ```bash
 bin/intel-snippet putty-host \
@@ -25,7 +54,7 @@ bin/intel-snippet putty-host \
   --source-host workstation01
 ```
 
-#### Ansible inventory target → host
+### Ansible inventory target → host
 
 ```bash
 bin/intel-snippet ansible-host \
@@ -37,7 +66,7 @@ bin/intel-snippet ansible-host \
   --source-host web01
 ```
 
-#### PSReadLine history hit → credential
+### PSReadLine history hit → credential
 
 ```bash
 bin/intel-snippet psreadline-credential \
@@ -50,16 +79,7 @@ bin/intel-snippet psreadline-credential \
   --source-host win01
 ```
 
-#### AV exclusion path → host artifact
-
-```bash
-bin/intel-snippet av-path-host \
-  --id temp-tools \
-  --exclusion-path 'C:\Users\Public\Tools' \
-  --source-host win01
-```
-
-#### DNS cache hit → host artifact
+### DNS cache hit → host artifact
 
 ```bash
 bin/intel-snippet dnscache-host \
@@ -70,7 +90,16 @@ bin/intel-snippet dnscache-host \
   --source-host win01
 ```
 
-#### USB history artifact → host artifact
+### AV exclusion path → host artifact
+
+```bash
+bin/intel-snippet av-path-host \
+  --id temp-tools \
+  --exclusion-path 'C:\Users\Public\Tools' \
+  --source-host win01
+```
+
+### USB history → host artifact
 
 ```bash
 bin/intel-snippet usb-artifact-host \
@@ -80,7 +109,7 @@ bin/intel-snippet usb-artifact-host \
   --source-host win01
 ```
 
-#### VPN config → pivot
+### VPN config → pivot
 
 ```bash
 bin/intel-snippet vpn-pivot \
@@ -93,7 +122,7 @@ bin/intel-snippet vpn-pivot \
   --source-host web01
 ```
 
-#### AD user/group finding → account
+### AD user/group finding → account
 
 ```bash
 bin/intel-snippet ad-account \
@@ -107,7 +136,7 @@ bin/intel-snippet ad-account \
   --source-playbook windows/enum-ad-users.ps1
 ```
 
-#### RDP artifact → host
+### RDP artifact → host
 
 ```bash
 bin/intel-snippet rdp-host \
@@ -116,7 +145,7 @@ bin/intel-snippet rdp-host \
   --source-host win01
 ```
 
-#### Browser/admin-console artifact → host
+### Browser / admin-console artifact → host
 
 ```bash
 bin/intel-snippet browser-host \
@@ -127,7 +156,7 @@ bin/intel-snippet browser-host \
   --source-host win01
 ```
 
-#### CIFS mount artifact → pivot
+### CIFS mount → pivot
 
 ```bash
 bin/intel-snippet cifs-pivot \
@@ -139,9 +168,7 @@ bin/intel-snippet cifs-pivot \
   --source-host web01
 ```
 
-### 1. Host from profile/config artifact
-
-Example: Ansible inventory reveals `db01`.
+### Host with full endpoint detail
 
 ```bash
 bin/intel-snippet host-endpoint \
@@ -159,7 +186,7 @@ bin/intel-snippet host-endpoint \
   --source-playbook linux/ansible-triage.sh
 ```
 
-### 2. Credential from recovered key or token
+### SSH key credential
 
 ```bash
 bin/intel-snippet credential \
@@ -177,7 +204,7 @@ bin/intel-snippet credential \
   --source-playbook linux/ssh-keys.sh
 ```
 
-### 3. Pivot from saved session / config evidence
+### Pivot from saved session evidence
 
 ```bash
 bin/intel-snippet pivot \
@@ -197,112 +224,142 @@ bin/intel-snippet pivot \
   --source-playbook windows/putty-sessions.ps1
 ```
 
-## Required schema and lifecycle fields
+---
 
-`intel_add` and `intel_update` validate entries before writing them. Validation errors are intentionally actionable and list the missing field or allowed enum values.
+## Lifecycle transitions
 
-### Required by every category
+Use `intel_update` for all status changes. It validates the transition, union-merges arrays, logs a timeline entry, and — for credentials — blocks future retrieval once terminal status is set.
 
-- `status`: one of the category-specific values below
-- `source.method`: how this intel was discovered
-- Prefer also adding `source.host`, `source.path`, `source.tool`, and/or `source.playbook` when known
+```text
+# Host through its lifecycle
+intel_update(category="host", id="web01",
+  fields="status: compromised", summary="Confirmed attacker presence on web01")
+
+intel_update(category="host", id="web01",
+  fields="status: contained\nnotes: C2 185.x.x.x blocked, PID 4523 killed",
+  summary="web01 contained")
+
+intel_update(category="host", id="web01",
+  fields="status: cleared\nnotes: Persistence removed, re-triage clean",
+  summary="web01 cleared")
+
+# Credential rotation — blocks intel_get_cred from returning the secret
+intel_update(category="credential", id="admin-ntlm",
+  fields="status: rotated", summary="Domain admin password reset by identity team")
+
+# Pivot cleanup
+intel_update(category="pivot", id="to-dc01",
+  fields="status: cleared", summary="Tunnel torn down, relay closed")
+```
+
+**Array merging:** Arrays union-merge by default — adding a new host to `valid_on` won't erase previous entries. Use `replace_arrays=true` only when intentionally replacing a list.
+
+**Terminal credential statuses:** `intel_get_cred` refuses to return secrets for credentials with status `rotated`, `expired`, `revoked`, `disabled`, `inactive`, or `invalid`. Use `force=true` on `intel_update` only to correct an erroneously set terminal status; for new secrets after rotation, create a new credential ID.
+
+---
+
+## Querying the store
+
+```text
+# All intel for a specific host: credentials, accounts, pivots
+intel_query(query_type="for_host", target="dc01")
+
+# All hosts where a credential is valid
+intel_query(query_type="for_credential", target="admin-ntlm")
+
+# Full listing by category
+intel_query(query_type="all_hosts")
+intel_query(query_type="all_credentials")
+intel_query(query_type="all_accounts")
+intel_query(query_type="all_pivots")
+
+# Cross-category keyword search
+intel_query(query_type="search", keyword="corp.local")
+
+# Counts and status breakdown
+intel_summary()
+
+# Chronological investigation record
+intel_timeline(action="view")
+intel_timeline(action="view", count=50)
+```
+
+---
+
+## Schema reference
+
+### Required fields — all categories
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `status` | ✓ | Per-category enum below |
+| `source.method` | ✓ | How this intel was discovered |
+| `source.host` | recommended | Which compromised host it came from |
+| `source.path` | recommended | File, registry key, or URL |
+| `source.playbook` | recommended | Playbook that found it |
 
 ### Hosts
 
-Required:
-- `status`
-- `source.method`
-- at least one locator: `ip`, `hostname`, non-empty `endpoints`, or non-empty `profile_artifacts`
+Required: `status`, `source.method`, plus at least one of: `ip`, `hostname`, non-empty `endpoints`, or non-empty `profile_artifacts`.
 
-Allowed `status` values:
-- `unknown`, `in-scope`, `out-of-scope`, `suspected`, `confirmed`, `compromised`, `contained`, `remediated`, `eradicated`, `cleared`, `unreachable`, `decommissioned`
+| Status | Meaning |
+|--------|---------|
+| `unknown` | In scope but not yet assessed |
+| `in-scope` | Within incident scope |
+| `out-of-scope` | Outside authorized scope |
+| `suspected` | May be compromised |
+| `confirmed` | Confirmed accessible |
+| `compromised` | Confirmed attacker presence |
+| `contained` | Isolated / C2 cut / processes killed |
+| `remediated` | Persistence removed |
+| `eradicated` | Full cleanup complete |
+| `cleared` | Post-eradication triage clean |
+| `unreachable` | Cannot currently access |
+| `decommissioned` | No longer active |
 
 ### Credentials
 
-Required:
-- `type`
-- `username`
-- `status`
-- `source.method`
-- credential material: `secret`, `key_file`, or `ticket_file`
+Required: `type`, `username`, `status`, `source.method`, plus one of: `secret`, `key_file`, `ticket_file`.
 
-Allowed `type` values:
-- `password`, `ntlm-hash`, `lm-hash`, `ssh-key`, `private-key`, `kerberos-tgt`, `kerberos-tgs`, `token`, `api-key`, `cookie`, `certificate`, `other`
+| Type | Notes |
+|------|-------|
+| `password` | Plaintext password |
+| `ntlm-hash` | LM:NT format or just `:NT` |
+| `lm-hash` | LM hash only |
+| `ssh-key` | Use `key_file` pointing to `workspace/intel/keys/` |
+| `private-key` | Non-SSH private key |
+| `kerberos-tgt` | TGT ticket — use `ticket_file` |
+| `kerberos-tgs` | Service ticket |
+| `token` | API or auth token |
+| `api-key` | API key |
+| `cookie` | Session cookie |
+| `certificate` | Client certificate |
+| `other` | Anything else |
 
-Allowed `status` values:
-- `unvalidated`, `suspected`, `compromised`, `active`, `confirmed`, `invalid`, `rotated`, `expired`, `revoked`, `disabled`, `inactive`
+| Status | Meaning |
+|--------|---------|
+| `unvalidated` | Found, not yet tested |
+| `suspected` | Likely valid |
+| `active` | Confirmed working |
+| `confirmed` | Alias for active |
+| `compromised` | Known to the attacker |
+| `invalid` | Tested, doesn't work ← terminal |
+| `rotated` | Secret changed ← terminal |
+| `expired` | Past expiry ← terminal |
+| `revoked` | Explicitly revoked ← terminal |
+| `disabled` | Account disabled ← terminal |
+| `inactive` | No longer in use ← terminal |
 
 ### Accounts
 
-Required:
-- `type`
-- `username`
-- `status`
-- `source.method`
+Required: `type`, `username`, `status`, `source.method`.
 
-Allowed `type` values:
-- `local`, `local-user`, `domain`, `domain-user`, `service-account`, `machine-account`, `group`, `cloud-user`, `other`
+`type`: `local`, `local-user`, `domain`, `domain-user`, `service-account`, `machine-account`, `group`, `cloud-user`, `other`
 
-Allowed `status` values:
-- `unknown`, `suspected`, `confirmed`, `compromised`, `active`, `contained`, `remediated`, `cleared`, `disabled`, `locked`, `inactive`
+`status`: `unknown`, `suspected`, `confirmed`, `compromised`, `active`, `contained`, `remediated`, `cleared`, `disabled`, `locked`, `inactive`
 
 ### Pivots
 
-Required:
-- `target`
-- `status`
-- `source.method`
-- non-empty `chain` list with at least `hop` per item
+Required: `target`, `status`, `source.method`, plus `chain` list with at least one entry containing `hop`.
 
-Allowed `status` values:
-- `suspected`, `confirmed`, `active`, `contained`, `blocked`, `cleared`, `inactive`
-
-### Updating lifecycle state
-
-Use `intel_update` instead of replacing entries by hand:
-
-```text
-intel_update(category="host", id="web01", fields="status: contained\nnotes: C2 blocked and persistence disabled", summary="web01 contained")
-intel_update(category="credential", id="admin-hash", fields="status: rotated", summary="admin hash rotated by identity team")
-intel_update(category="pivot", id="to-db01", fields="status: cleared", summary="Pivot path no longer active")
-```
-
-Arrays are union-merged by default, so adding a new `valid_on` host does not erase existing validation results. Set `replace_arrays=true` only when intentionally replacing a list. Credential terminal statuses (`rotated`, `expired`, `revoked`, `disabled`, `inactive`, `invalid`) are not reactivated without `force=true`; prefer a new credential ID for replacement secrets.
-
-## Normalized fields
-
-### Hosts
-
-- `endpoints`
-- `profile_artifacts`
-- `source.host`
-- `source.method`
-- `source.path`
-- `source.tool`
-- `source.playbook`
-
-### Credentials
-
-- `valid_on`
-- `related_hosts`
-- `source.*`
-
-### Pivots
-
-- `chain`
-- `evidence`
-- `related_hosts`
-- `source.*`
-
-## Recommended operator flow
-
-1. Run gather playbook
-2. Identify host / credential / pivot artifact
-3. Use `bin/intel-snippet ...` to build normalized YAML
-4. Paste the emitted `intel_add(...)` call into pi
-5. Confirm with:
-
-```text
-intel_query(query_type="for_host", target="db01")
-intel_summary()
-```
+`status`: `suspected`, `confirmed`, `active`, `contained`, `blocked`, `cleared`, `inactive`

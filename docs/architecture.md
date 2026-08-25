@@ -1,106 +1,195 @@
 # Architecture
 
-## Goal
+## Overview
 
-Provide a containerized pi harness for authorized incident response, active threat pursuit, and attacker eradication across mixed environments.
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Docker Container                                                     │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  pi — AI agent                                               │   │
+│  │                                                              │   │
+│  │  ┌─────────────────────┐   ┌──────────────────────────┐    │   │
+│  │  │  remote-session.ts  │   │    intel-store.ts         │    │   │
+│  │  │  ─────────────────  │   │    ─────────────────────  │    │   │
+│  │  │  remote_connect     │   │    intel_add              │    │   │
+│  │  │  remote_exec        │   │    intel_update           │    │   │
+│  │  │  remote_upload      │   │    intel_query            │    │   │
+│  │  │  remote_sessions    │   │    intel_get_cred         │    │   │
+│  │  │  remote_disconnect  │   │    intel_timeline         │    │   │
+│  │  │  remote_tunnel[_cl] │   │    intel_summary          │    │   │
+│  │  │  remote_relay[_cl]  │   └────────────┬─────────────┘    │   │
+│  │  │                     │                │                   │   │
+│  │  │  /land   /assess    │                ▼                   │   │
+│  │  │  /pursue /contain   │   workspace/intel/                 │   │
+│  │  │  /eradicate /verify │   ├── hosts.yaml                   │   │
+│  │  └──────────┬──────────┘   ├── credentials.yaml             │   │
+│  │             │              ├── accounts.yaml                │   │
+│  │  ┌──────────▼──────────┐   ├── pivots.yaml                  │   │
+│  │  │  Skills             │   └── timeline.yaml                │   │
+│  │  │  ─────────────────  │                                    │   │
+│  │  │  gather-playbooks   │   logs/                            │   │
+│  │  │  host-ir-playbooks  │   ├── audit-YYYYMMDD.log           │   │
+│  │  │  escalate-playbook  │   └── remote-sessions/             │   │
+│  │  │  shell-commands     │                                    │   │
+│  │  │  nmap-playbooks     │                                    │   │
+│  │  └─────────────────────┘                                    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  Harness tools  (run here — never installed on targets)              │
+│  ssh · sshpass · pwsh · nmap · ncat · nc · proxychains4             │
+│  secretsdump.py · psexec.py · wmiexec.py · smbexec.py              │
+│  ntlmrelayx.py · netexec · ir-log · intel-snippet                  │
+└──────────────────────────────────────────────────────────────────────┘
+              │ SSH / WinRM / TCP / telnet
+   ┌──────────┼──────────────┐
+   ▼          ▼              ▼
+Linux     Windows        macOS / network device
+(native)  (native)       (native)
+```
 
-## Non-Goals
+## Container layer
 
-- Attacking external or third-party systems outside incident scope.
-- Operating outside authorized incident scope.
-- Replacing mature orchestration systems before they are needed.
+A Debian bookworm-slim image. No daemons. `pi` launches by default; `--entrypoint bash` gives a plain shell.
 
-## Components
+| Tool | Purpose |
+|------|---------|
+| `ssh`, `sshpass` | SSH access, ProxyJump chains, port forwards, password-based auth |
+| `pwsh` | PowerShell 7, WinRM |
+| `nmap`, `ncat`, `nc` | Service discovery, relay setup |
+| `proxychains4` | Route any tool through a SOCKS proxy |
+| `secretsdump.py` | Remote SAM/LSASS/NTDS credential dump over SMB |
+| `psexec.py`, `wmiexec.py`, `smbexec.py` | Lateral movement with recovered credentials |
+| `ntlmrelayx.py` | NTLM relay |
+| `netexec` | Credential validation at scale — SMB, WinRM, SSH, MSSQL |
+| `ir-log` | Appends timestamped audit entries to `logs/audit-YYYYMMDD.log` |
+| `intel-snippet` | Generates normalized `intel_add(...)` payloads from gather output |
+| `curl`, `jq`, `git`, `python3`, `ripgrep`, `fd`, `neovim` | Support tools |
 
-### Container Image
+## Agent layer
 
-The image contains client-side IR and administration tools. It does not run a daemon by default.
+`pi` is the AI agent. Two TypeScript extensions add IR-specific tools to its context, loaded automatically from `.pi/extensions/`.
 
-Tools include:
-- OpenSSH client (pivoting, tunneling, key-based access)
-- PowerShell 7 (remote Windows administration)
-- Impacket suite (PsExec, WMIExec, SMBExec, secretsdump, ntlmrelayx)
-- NetExec (credential validation, lateral movement)
-- proxychains4 (SOCKS proxying through pivot chains)
-- nmap / ncat / nc (reconnaissance and relay)
-- Standard Unix utilities
+### remote-session.ts — 9 tools + 6 phase commands
 
-### Inventory
+**Remote access tools:**
 
-During active incidents, track discovered hosts in `workspace/`, for example `workspace/scope.yaml`, for reporting. The structured intel store also defaults to `workspace/intel/` so it persists when the repo's `workspace/` directory is mounted into the container.
+| Tool | What it does |
+|------|-------------|
+| `remote_connect` | Open a named persistent session: SSH, WinRM, TCP, or telnet. Multiple concurrent sessions supported. |
+| `remote_exec` | Run a command in a named session. Shell state (cwd, env) persists between calls. |
+| `remote_upload` | Write text content to a remote path via heredoc — no scp needed. |
+| `remote_sessions` | List all active sessions, tunnels, and relays. |
+| `remote_disconnect` | Close a session by name or all sessions. |
+| `remote_tunnel` / `remote_tunnel_close` | SSH local, remote, or dynamic SOCKS tunnels. Supports `identity=`, `password=`, `proxy_jump=`. |
+| `remote_relay` / `remote_relay_close` | TCP relay on an existing session using socat, ncat, nc, or netsh portproxy. |
 
-### Tools
+**Phase commands** (registered as pi slash commands):
 
-All tools (`ssh`, `nmap`, `secretsdump.py`, `netexec`, etc.) are used directly. No allowlist gates.
+| Command | Produces |
+|---------|---------|
+| `/land` | Fast-access primitives and post-landing checklist |
+| `/assess [session]` | Platform-specific first-look and triage commands for that session |
+| `/pursue` | Credential and pivot chase-board |
+| `/contain [session]` | Evidence-first containment command pack (no auto-execution) |
+| `/eradicate [session]` | Persistence removal workflow (no auto-execution) |
+| `/verify [session]` | Post-action verification checks |
 
-`bin/ir-log` is a minimal audit utility that appends timestamped entries to `logs/audit-YYYYMMDD.log` and records local execution context such as host, operator, and optional auth context.
+Append `--prompt` to stage an editable agent prompt instead of displaying inline.
 
-The `remote-session` extension (`.pi/extensions/remote-session.ts`) provides persistent multi-session management with built-in audit logging for all commands.
+Every `remote_exec` call is logged to `logs/remote-sessions/` with session name, timestamp, command, and truncated output.
 
-### Logs
+### intel-store.ts — 6 tools
 
-Logs are local plain-text append-only operational records. For production, mount `logs/` to durable storage and ship it to your central logging system. Every credential harvest, pivot, and eradication action is recorded.
+| Tool | What it does |
+|------|-------------|
+| `intel_add` | Add a new entry with schema validation and provenance tracking. Auto-appends a timeline entry. |
+| `intel_update` | Merge updates into an existing entry. Validates lifecycle transitions. Blocks reactivating terminal-status credentials without `force=true`. |
+| `intel_query` | Query by host, credential, category, or keyword. |
+| `intel_get_cred` | Retrieve a credential secret (password, hash, key path). Refuses terminal-status credentials. |
+| `intel_timeline` | Add a manual timeline entry or view recent entries. |
+| `intel_summary` | Counts and status breakdown across all categories. |
 
-During extension/skill development, also mount host `.pi/` to `/opt/brjotskel/.pi` so changes to local pi extensions and skills are immediately visible in the container without rebuilding the image.
+The intel store normalizes arrays (union-merge by default) and validates schema on every write. Validation errors name the missing field and list allowed enum values.
 
-## Operational Workflows
+## Data layer
 
-### 1. Reconnaissance & Scoping
-- Network scanning of internal ranges to identify attacker infrastructure.
-- Service enumeration on suspected compromised hosts.
-- Passive credential harvesting (network captures, cached auth).
+### Intel store — workspace/intel/
 
-### 2. Credential Recovery
-- Dump SAM/SYSTEM/SECURITY from confirmed compromised Windows hosts.
-- Extract LSASS memory for cached credentials and Kerberos tickets.
-- Collect /etc/shadow, SSH keys, and keyrings from compromised Linux hosts.
-- Collect keychain metadata, SSH material, shell histories, and autologin/FileVault indicators from compromised macOS hosts.
-- Validate recovered credentials against other systems to map attacker's reach.
+Five YAML files written by the intel-store extension. Readable by querying tools and directly as text.
 
-### 3. Pivoting & Pursuit
-- Establish SSH tunnels / SOCKS proxies through compromised hosts.
-- Follow attacker's lateral movement path using recovered credentials.
-- Map the full extent of compromised systems ("attacker's real estate").
-- Normalize recovered profile/config artifacts into intel:
-  - host `endpoints` from PuTTY / SSH / Ansible / VPN / remote-admin profiles
-  - credential `source.path` / `source.tool` / `source.playbook` for provenance
-  - pivot `evidence` entries from saved sessions, inventories, and config files
-- Document all pivot paths for the incident timeline.
+```
+workspace/intel/
+├── hosts.yaml           # Compromised/suspected/cleared hosts
+├── credentials.yaml     # Harvested passwords, hashes, keys, tokens
+├── accounts.yaml        # Domain and local accounts encountered
+├── pivots.yaml          # Access paths through the network
+└── timeline.yaml        # Chronological investigation record
+```
 
-### 4. Active Containment
-- Block C2 communications at host and network level.
-- Kill attacker processes and sessions.
-- Disable compromised accounts.
-- Isolate systems pending full eradication.
+Files are created with restrictive permissions (0600, directory 0700) to protect credential material at rest. The `intel_get_cred` tool refuses to return secrets for credentials with terminal statuses: `rotated`, `expired`, `revoked`, `disabled`, `inactive`, `invalid`.
 
-### 5. Eradication
-- Remove all identified persistence mechanisms.
-- Force credential rotation for all harvested/exposed credentials.
-- Verify eradication with post-action checks.
-- Document all changes for the incident report.
+See [intel-import-workflow.md](intel-import-workflow.md) for the full schema and lifecycle state machines.
 
-## Platform Strategy
+### Logs — logs/
 
-- Linux: SSH and native shell commands, plus gather playbooks for credentials, network, persistence, and protections.
-- macOS: SSH and native shell commands, plus gather playbooks for `launchd`, keychain metadata, Wi-Fi preferences, autologin checks, FileVault/SIP state, and user persistence artifacts.
-- Windows: PowerShell 7, PowerShell Remoting, WMI, SMB, RDP, or OpenSSH.
-- Cisco/Juniper: SSH to device CLI or approved automation interfaces.
-- Active Directory: Impacket, NetExec for credential validation and lateral movement mapping.
+```
+logs/
+├── audit-YYYYMMDD.log      # ir-log output + remote-session extension audit entries
+└── remote-sessions/        # Per-session command logs: <session>-<timestamp>.log
+```
 
-## Proxy & Pivot Strategy
+Logs are append-only plain text. Mount `logs/` to durable host storage and ship to a SIEM for production deployments.
 
-- First hop: Direct SSH/WinRM from harness to compromised host.
-- Multi-hop: SSH ProxyJump or dynamic SOCKS through pivot chain.
-- Windows pivoting: netsh portproxy, SSH tunnels, or Impacket SOCKS.
-- All pivots documented in `workspace/`, for example `workspace/pivot-chain.md`.
+## Skills layer
 
-## Future Enhancements
+Skills are markdown files and scripts that give the agent domain knowledge — which playbook to reach for, how to interpret findings, what to do next. Stored in `.pi/skills/`.
 
-Add only when required:
+| Skill | Scripts | Content |
+|-------|---------|---------|
+| `gather-playbooks` | 49 | Collection scripts: Linux × 16, Windows × 24, macOS × 9 |
+| `host-ir-playbooks` | 9 | Host-centric IR: Linux × 1, Windows × 7, macOS × 1 |
+| `escalate-playbook` | 3 | Privilege escalation audit: Linux, Windows, macOS |
+| `shell-commands` | 15 ref docs | Native command references: LOLBAS, GTFOBins, persistence, lateral movement, containment |
+| `nmap-playbooks` | 1 script | Network discovery, NSE script selection, safe scan design |
 
-- Automated credential spray validation
-- Graphical pivot/relationship mapping
-- Integration with SIEM for real-time IOC correlation
-- Automated persistence scanner across scope
-- Session recording and replay
-- Integration with ticketing/approval systems
+All scripts use native OS commands. Nothing is uploaded to targets — the agent reads scripts from the container filesystem and runs them inline via `remote_exec` or stages them with `remote_upload`.
+
+## Persistence
+
+Mount these directories to preserve state across container runs:
+
+| Mount | What persists |
+|-------|--------------|
+| `-v "$PWD/logs:/opt/brjotskel/logs"` | Audit and per-session command logs |
+| `-v "$PWD/.pi:/opt/brjotskel/.pi"` | Extensions, skills, settings, and local npm package cache |
+| `-v "$PWD/workspace:/opt/brjotskel/workspace"` | Intel store (YAML files) and operator scratch space |
+
+The intel store location defaults to `$BRJOTSKEL_INTEL_DIR` (container default: `/opt/brjotskel/workspace/intel`).
+
+## Development workflow
+
+Mounting `.pi/` makes extension and skill changes visible inside the container without rebuilding the image:
+
+```sh
+docker run --rm -it \
+  -v "$PWD/logs:/opt/brjotskel/logs" \
+  -v "$PWD/.pi:/opt/brjotskel/.pi" \
+  -v "$PWD/workspace:/opt/brjotskel/workspace" \
+  brjotskel:local
+```
+
+Rebuild the image only when changing `bin/`, `Dockerfile`, or base OS dependencies.
+
+Run the test harness before pushing:
+
+```sh
+bash bin/test    # smoke check + 9 Python unit tests + 45 Node tests
+```
+
+## Non-goals
+
+- Operating against systems outside the authorized incident scope
+- Running daemons or listeners inside the container
+- Replacing mature SOAR or ticketing systems before they are needed
+- Dropping tools or agents onto target hosts
