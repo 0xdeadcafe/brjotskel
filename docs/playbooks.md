@@ -63,6 +63,7 @@ Broad collection scripts. Run these to understand a host's state, recover creden
 | `enum-ad-groups.ps1` | domain | Privileged and operationally relevant domain groups and members |
 | `enum-ad-spns.ps1` | domain | SPN-bearing user/computer accounts, Kerberoastable targets |
 | `enum-ad-computers.ps1` | domain | Domain computer inventory, OS fields, naming clues, managedBy hints |
+| `enum-cloud-credentials.ps1` | credentials | EC2/Azure/GCP IMDS endpoints, attached IAM roles/managed identities, expiry, blast radius notes |
 
 ### macOS — 10 scripts
 
@@ -124,9 +125,11 @@ Evidence-first. Every script captures volatile state, performs the minimum actio
 | Linux | `block-c2.sh` | Record C2 IP, add iptables/nft drop rules inbound and outbound, verify |
 | Linux | `disable-account.sh` | Lock password, set shell to nologin, kill sessions, verify |
 | Linux | `isolate-host.sh` | Allow-analyst-only iptables, drop all other I/O — nuclear option |
+| macOS | `isolate-host.sh` | Allow-analyst-only pf ruleset, block all other I/O — does NOT persist across reboots |
 | Windows | `kill-process.ps1` | Stop-Process with pre/post evidence, hash binary |
 | Windows | `block-c2.ps1` | New-NetFirewallRule inbound + outbound, verify |
 | Windows | `disable-account.ps1` | Local and AD variants, logoff sessions, Stop-Process by owner, verify |
+| Windows | `isolate-host.ps1` | Allow-analyst-only Windows Firewall rules, default-block all profiles, verify — ⚠️ persists across reboots |
 | macOS | `kill-process.sh` | Pre-kill evidence via lsof, SIGTERM → SIGKILL, verify, check for respawn |
 | macOS | `block-c2.sh` | pf rule for C2 IP (inbound + outbound), verify |
 | macOS | `disable-account.sh` | dscl password disable, shell to /usr/bin/false, pkill -U, verify |

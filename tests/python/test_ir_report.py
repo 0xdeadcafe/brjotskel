@@ -169,5 +169,72 @@ class TestIrReportBasic(unittest.TestCase):
             self.assertIn("to-dc01", result.stdout)
 
 
+    def test_short_format_contains_key_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(
+                tmp,
+                hosts={
+                    "web01": {"ip": "10.10.10.5", "platform": "linux",
+                              "status": "compromised", "source": {"method": "test"}},
+                    "db01": {"ip": "10.10.20.10", "platform": "linux",
+                             "status": "cleared", "source": {"method": "test"}},
+                },
+                credentials={
+                    "admin-hash": {"type": "ntlm-hash", "username": "admin",
+                                   "status": "active", "source": {"method": "test"},
+                                   "secret": "aad3b...", "valid_on": ["web01"]},
+                    "old-cred": {"type": "password", "username": "svc",
+                                 "status": "rotated", "source": {"method": "test"},
+                                 "secret": "x"},
+                },
+                timeline=[
+                    {"ts": "2026-08-25T10:00:00Z", "type": "host",
+                     "action": "discovered", "target": "web01", "summary": "Initial host"},
+                ],
+            )
+            result = run_report("--short", intel_dir=d)
+            self.assertEqual(result.returncode, 0)
+            out = result.stdout
+            # Key sections present
+            self.assertIn("INCIDENT BRIEF", out)
+            self.assertIn("ROTATION REQUIRED", out)
+            self.assertIn("admin-hash", out)
+            # Rotated credential should NOT appear in rotation list
+            self.assertNotIn("old-cred", out)
+            # Should NOT contain full timeline or host inventory tables
+            self.assertNotIn("## Timeline", out)
+            self.assertNotIn("## Host Inventory", out)
+
+    def test_short_format_no_rotation_when_all_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(
+                tmp,
+                credentials={
+                    "done": {"type": "password", "username": "svc",
+                             "status": "rotated", "source": {"method": "test"}, "secret": "x"},
+                },
+            )
+            result = run_report("--short", intel_dir=d)
+            self.assertEqual(result.returncode, 0)
+            self.assertNotIn("ROTATION REQUIRED", result.stdout)
+            self.assertIn("No credentials pending rotation", result.stdout)
+
+    def test_short_and_full_are_different(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(
+                tmp,
+                hosts={"h": {"ip": "1.2.3.4", "platform": "linux",
+                              "status": "compromised", "source": {"method": "t"}}},
+                credentials={"c": {"type": "password", "username": "u",
+                                   "status": "active", "source": {"method": "t"}, "secret": "s"}},
+            )
+            short_result = run_report("--short", intel_dir=d)
+            full_result  = run_report(intel_dir=d)
+            self.assertEqual(short_result.returncode, 0)
+            self.assertEqual(full_result.returncode, 0)
+            # Short output should be substantially smaller
+            self.assertLess(len(short_result.stdout), len(full_result.stdout))
+
+
 if __name__ == "__main__":
     unittest.main()

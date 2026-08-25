@@ -49,6 +49,7 @@ Structured, runnable containment scripts for active incident response. Each foll
 | `windows/kill-process.ps1` | Document, Stop-Process, verify, hash binary |
 | `windows/block-c2.ps1` | Record IP, New-NetFirewallRule (inbound + outbound), verify |
 | `windows/disable-account.ps1` | Local and AD variants, kill sessions, verify |
+| `windows/isolate-host.ps1` | Allow-analyst-only Windows Firewall rules, block-all default policy, verify |
 
 ### macOS
 
@@ -57,6 +58,7 @@ Structured, runnable containment scripts for active incident response. Each foll
 | `macos/kill-process.sh` | Document, kill, verify gone |
 | `macos/block-c2.sh` | Record IP, pf rule, verify |
 | `macos/disable-account.sh` | Disable password, set shell to /usr/bin/false, kill sessions, verify |
+| `macos/isolate-host.sh` | Allow-analyst-only pf ruleset, block all other I/O, verify |
 
 ## Workflow
 

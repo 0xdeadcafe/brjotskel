@@ -58,7 +58,7 @@
  *   - pwsh (PowerShell) — optional, for WinRM
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -1093,6 +1093,39 @@ export default function (pi: ExtensionAPI) {
       const activeSessionNames = new Set([...sessions.keys()]);
       const map = buildIntelMap(raw.hosts, raw.credentials, raw.accounts, raw.pivots, { activeSessions: activeSessionNames });
       ctx.ui.notify(map, "info");
+    },
+  });
+
+  pi.registerCommand("report", {
+    description: "Incident summary: host status, credential rotation requirements, last 3 timeline events",
+    handler: async (_args, ctx) => {
+      // Resolve ir-report path: prefer PATH, fall back to container-default location
+      const irReportBin =
+        spawnSync("which", ["ir-report"], { encoding: "utf8" }).stdout?.trim() ||
+        "/opt/brjotskel/bin/ir-report";
+
+      const intelDir =
+        process.env.BRJOTSKEL_INTEL_DIR ||
+        join(process.cwd(), "workspace", "intel");
+
+      const result = spawnSync(
+        "python3",
+        [irReportBin, "--short", "--intel-dir", intelDir],
+        { encoding: "utf8", timeout: 15_000 },
+      );
+
+      if (result.error) {
+        ctx.ui.notify(`/report failed: ${result.error.message}`, "error");
+        return;
+      }
+      if (result.status !== 0) {
+        const errMsg = result.stderr?.trim() || `exit ${result.status}`;
+        ctx.ui.notify(`/report failed: ${errMsg}`, "error");
+        return;
+      }
+
+      const output = result.stdout?.trim() || "(no output)";
+      ctx.ui.notify(output, "info");
     },
   });
 

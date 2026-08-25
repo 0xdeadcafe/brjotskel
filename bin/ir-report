@@ -274,6 +274,71 @@ def build_timeline(timeline: list) -> str:
 # Assemble report
 # ---------------------------------------------------------------------------
 
+def build_short_report(intel_dir: Path) -> str:
+    """TUI-friendly condensed report: exec summary + rotation list only."""
+    hosts_raw       = load_yaml(intel_dir / "hosts.yaml")
+    creds_raw       = load_yaml(intel_dir / "credentials.yaml")
+    accounts_raw    = load_yaml(intel_dir / "accounts.yaml")
+    pivots_raw      = load_yaml(intel_dir / "pivots.yaml")
+    timeline_raw    = load_yaml(intel_dir / "timeline.yaml")
+
+    hosts       = hosts_raw.get("hosts", {})          if isinstance(hosts_raw.get("hosts"), dict)       else {}
+    credentials = creds_raw.get("credentials", {})    if isinstance(creds_raw.get("credentials"), dict)  else {}
+    accounts    = accounts_raw.get("accounts", {})    if isinstance(accounts_raw.get("accounts"), dict)  else {}
+    pivots      = pivots_raw.get("paths", {})          if isinstance(pivots_raw.get("paths"), dict)        else {}
+    timeline    = timeline_raw.get("timeline", [])    if isinstance(timeline_raw.get("timeline"), list)  else []
+
+    dirty  = [hid for hid, h in hosts.items() if h.get("status") in ("compromised", "contained", "suspected")]
+    clean  = [hid for hid, h in hosts.items() if h.get("status") in ("cleared", "eradicated")]
+    needs_rotation = [(cid, c) for cid, c in credentials.items() if not is_terminal(c.get("status"))]
+
+    lines = [
+        f"=== INCIDENT BRIEF — {ts_now()} ===",
+        "",
+    ]
+
+    # Host status
+    lines.append(f"Hosts: {len(hosts)} total | {len(dirty)} dirty | {len(clean)} cleared")
+    if dirty:
+        lines.append("  Dirty:  " + "  ".join(f"{status_emoji(hosts[h].get('status','?'))} {h}" for h in dirty))
+    if clean:
+        lines.append("  Cleared: " + "  ".join(f"✅ {h}" for h in clean))
+
+    lines.append("")
+
+    # Credential status
+    active_creds = [(cid, c) for cid, c in credentials.items() if c.get("status") == "active"]
+    unvalidated  = [(cid, c) for cid, c in credentials.items()
+                    if not is_terminal(c.get("status")) and not (c.get("valid_on") or [])]
+    lines.append(f"Credentials: {len(credentials)} total | {len(active_creds)} active | {len(unvalidated)} unvalidated | {len(needs_rotation)} need rotation")
+
+    lines.append("")
+
+    # Rotation requirements
+    if needs_rotation:
+        lines.append(f"⚠️  ROTATION REQUIRED ({len(needs_rotation)} credentials):")
+        for cid, c in sorted(needs_rotation):
+            username = c.get("username", "?")
+            if c.get("domain"):
+                username = f"{c['domain']}\\{username}"
+            valid_on = ", ".join(c.get("valid_on") or []) or "unvalidated"
+            lines.append(f"  {status_emoji(c.get('status','?'))} {cid}  ({c.get('type','?')} / {username})  valid_on: {valid_on}")
+    else:
+        lines.append("✅ No credentials pending rotation")
+
+    lines.append("")
+
+    # Timeline tail
+    if timeline:
+        lines.append(f"Last 3 events (of {len(timeline)}):")
+        for entry in timeline[-3:][::-1]:
+            if isinstance(entry, dict):
+                ts = (entry.get("ts") or entry.get("timestamp") or "")[:19]
+                lines.append(f"  {ts}  {entry.get('summary', '')}")
+
+    return "\n".join(lines)
+
+
 def build_markdown_report(intel_dir: Path) -> str:
     hosts_raw       = load_yaml(intel_dir / "hosts.yaml")
     creds_raw       = load_yaml(intel_dir / "credentials.yaml")
@@ -348,6 +413,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "--short", action="store_true",
+        help="TUI-friendly condensed output: exec summary and rotation list only (used by /report slash command)",
+    )
+    parser.add_argument(
         "--format", choices=["md", "json"], default="md",
         help="Output format: md (markdown, default) or json",
     )
@@ -367,7 +436,9 @@ def main() -> None:
         sys.exit(f"Error: intel store directory not found: {intel_dir}\n"
                  f"Mount workspace/ or set BRJOTSKEL_INTEL_DIR.")
 
-    if args.format == "json":
+    if args.short:
+        output = build_short_report(intel_dir)
+    elif args.format == "json":
         output = build_json_report(intel_dir)
     else:
         output = build_markdown_report(intel_dir)

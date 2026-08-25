@@ -44,7 +44,7 @@ function sessionHeader(phase: string, session?: OperatorSessionSummary, sessions
   return `=== ${phase.toUpperCase()} ===\n${activeSessionLine(sessions)}`;
 }
 
-function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: string; persistence: string; credentials: string; ir: string; verify: string[]; collectEvidence: string; containKill: string; containBlock: string; containDisable: string; eradScripts: string[] } {
+function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: string; persistence: string; credentials: string; ir: string; verify: string[]; collectEvidence: string; containKill: string; containBlock: string; containDisable: string; containIsolate: string; eradScripts: string[] } {
   switch (platform) {
     case "windows":
       return {
@@ -62,6 +62,7 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
         containKill: ".pi/skills/containment-playbooks/windows/kill-process.ps1",
         containBlock: ".pi/skills/containment-playbooks/windows/block-c2.ps1",
         containDisable: ".pi/skills/containment-playbooks/windows/disable-account.ps1",
+        containIsolate: ".pi/skills/containment-playbooks/windows/isolate-host.ps1",
         eradScripts: [
           ".pi/skills/eradication-playbooks/windows/remove-scheduled-task.ps1",
           ".pi/skills/eradication-playbooks/windows/remove-service.ps1",
@@ -85,6 +86,7 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
         containKill: ".pi/skills/containment-playbooks/macos/kill-process.sh",
         containBlock: ".pi/skills/containment-playbooks/macos/block-c2.sh",
         containDisable: ".pi/skills/containment-playbooks/macos/disable-account.sh",
+        containIsolate: ".pi/skills/containment-playbooks/macos/isolate-host.sh",
         eradScripts: [
           ".pi/skills/eradication-playbooks/macos/remove-launch-item.sh",
         ],
@@ -106,6 +108,7 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
         containKill: ".pi/skills/containment-playbooks/linux/kill-process.sh",
         containBlock: ".pi/skills/containment-playbooks/linux/block-c2.sh",
         containDisable: ".pi/skills/containment-playbooks/linux/disable-account.sh",
+        containIsolate: ".pi/skills/containment-playbooks/linux/isolate-host.sh",
         eradScripts: [
           ".pi/skills/eradication-playbooks/linux/remove-cron.sh",
           ".pi/skills/eradication-playbooks/linux/remove-systemd-unit.sh",
@@ -127,7 +130,7 @@ export function buildAssessPrompt(session: OperatorSessionSummary): string {
 
 export function buildContainPrompt(session: OperatorSessionSummary): string {
   const p = scriptPaths(session.platform);
-  return `Prepare evidence-first containment for remote session "${session.name}". Step 1: read and run ${p.collectEvidence} to capture volatile state — save output to workspace/evidence/${session.name}/. Step 2: based on findings, run targeted containment using the appropriate script: kill-process (${p.containKill}), block-c2 (${p.containBlock}), disable-account (${p.containDisable}), or isolate (linux: .pi/skills/containment-playbooks/linux/isolate-host.sh). Read each script first — they are parameterised. Step 3: verify each action. Do not execute disruptive commands without explicit operator confirmation.`;
+  return `Prepare evidence-first containment for remote session "${session.name}". Step 1: read and run ${p.collectEvidence} to capture volatile state — save output to workspace/evidence/${session.name}/. Step 2: based on findings, run targeted containment using the appropriate script: kill-process (${p.containKill}), block-c2 (${p.containBlock}), disable-account (${p.containDisable}), or isolate (${p.containIsolate}). Read each script first — they are parameterised. Step 3: verify each action. Do not execute disruptive commands without explicit operator confirmation.`;
 }
 
 export function buildEradicatePrompt(session: OperatorSessionSummary): string {
@@ -264,9 +267,7 @@ export function formatContainShortcut(session: OperatorSessionSummary | undefine
     `   Kill process:    ${p.containKill}  (TARGET_PID=<pid>)`,
     `   Block C2:        ${p.containBlock}  (C2_IP=<ip>)`,
     `   Disable account: ${p.containDisable}  (TARGET_USER=<user>)`,
-    ...(session.platform === "linux"
-      ? ["   Isolate host:    .pi/skills/containment-playbooks/linux/isolate-host.sh  (ANALYST_IP=<your-ip>)"]
-      : []),
+    `   Isolate host:    ${p.containIsolate}  (ANALYST_IP=<your-ip>)`,
     "",
     "After action — record:",
     "   intel_update(category=\"host\", id=\"<host>\", fields=\"status: contained\\nnotes: ...\", summary=\"...\")",

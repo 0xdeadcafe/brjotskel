@@ -98,6 +98,7 @@ Type these directly into the agent for fast-path access:
 | `/verify <session>` | Post-action checks: persistence gone, C2 silent, accounts locked, re-triage clean |
 | `/scope` | Situational dump: active sessions, tunnels, intel counts, last 5 timeline events |
 | `/map` | Text attack graph: host nodes, credential blast radius edges, pivot chains |
+| `/report` | Incident brief: host status, credential rotation list, last 3 timeline events |
 | `/brief` | Tactical intel brief: host status, credentials, pivots, open leads, next move |
 
 Append `--prompt` to stage an editable agent prompt, e.g. `/assess web01 --prompt`.
@@ -113,7 +114,7 @@ Append `--prompt` to stage an editable agent prompt, e.g. `/assess web01 --promp
 
 | Category | Linux | Windows | macOS | Network devices |
 |----------|------:|--------:|------:|----------------:|
-| Gather | 19 | 27 | 10 | 3 |
+| Gather | 19 | 28 | 10 | 3 |
 | Host IR | 2 | 8 | 2 | — |
 | Containment | 4 | 3 | 3 | — |
 | Eradication | 4 | 4 | 5 | — |
@@ -227,7 +228,7 @@ brjotskel operates under an explicit rules of engagement framework. See [CONSTIT
 ## CI
 
 ```yaml
-- run: bash bin/test        # smoke check + 26 Python unit tests + 88 Node tests
+- run: bash bin/test        # smoke check + 29 Python unit tests + 88 Node tests
 - run: docker build -t brjotskel:ci .
 ```
 
