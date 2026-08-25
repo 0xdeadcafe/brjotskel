@@ -102,7 +102,13 @@ Extensions live in `.pi/extensions/`. Pi loads all `.ts` files in that directory
     simple-yaml.ts         — in-process YAML parser/dumper
 ```
 
-**Live-reload during development:** mount `.pi/` so extension changes are visible without rebuilding:
+**Live-reload during development:** use the `dev` compose service so extension and skill changes are visible without rebuilding:
+
+```sh
+docker compose run --rm dev
+```
+
+Or without Compose:
 
 ```sh
 docker run --rm -it \

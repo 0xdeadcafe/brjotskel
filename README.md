@@ -32,31 +32,29 @@ Most IR tooling assumes either (a) an agent is already deployed, or (b) you have
 ```sh
 git clone https://github.com/0xdeadcafe/brjotskel
 cd brjotskel
-docker build -t brjotskel:local .
-
-docker run --rm -it \
-  -v "$PWD/logs:/opt/brjotskel/logs" \
-  -v "$PWD/workspace:/opt/brjotskel/workspace" \
-  brjotskel:local
+docker compose build
+docker compose run --rm brjotskel
 ```
 
 The container drops you into [pi](https://github.com/earendil-works/pi), an AI agent pre-configured with the Ghost IR persona, all playbooks, and the intel store. Describe the incident and it gets to work.
 
-Mount `logs/` and `workspace/` so audit logs and the intel store persist across container restarts.
+`logs/` and `workspace/` are mounted automatically — the intel store and audit logs persist across runs.
 
 **Shell access (no agent):**
 ```sh
-docker run --rm -it --entrypoint bash \
-  -v "$PWD/logs:/opt/brjotskel/logs" \
-  -v "$PWD/workspace:/opt/brjotskel/workspace" \
-  brjotskel:local
+docker compose run --rm shell
 ```
 
-**Development (live-reload extensions and playbooks):**
+**Development (live-reload extensions and playbooks without rebuilding):**
 ```sh
+docker compose run --rm dev
+```
+
+**Or without Compose:**
+```sh
+docker build -t brjotskel:local .
 docker run --rm -it \
   -v "$PWD/logs:/opt/brjotskel/logs" \
-  -v "$PWD/.pi:/opt/brjotskel/.pi" \
   -v "$PWD/workspace:/opt/brjotskel/workspace" \
   brjotskel:local
 ```

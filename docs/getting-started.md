@@ -17,12 +17,8 @@ You have access to a compromised host. You need to determine scope, follow the c
 ```sh
 git clone https://github.com/0xdeadcafe/brjotskel
 cd brjotskel
-docker build -t brjotskel:local .
-
-docker run --rm -it \
-  -v "$PWD/logs:/opt/brjotskel/logs" \
-  -v "$PWD/workspace:/opt/brjotskel/workspace" \
-  brjotskel:local
+docker compose build
+docker compose run --rm brjotskel
 ```
 
 The container starts directly in the [pi](https://github.com/earendil-works/pi) agent session, with the Ghost IR persona active. You are ready to work.

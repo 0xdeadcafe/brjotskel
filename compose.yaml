@@ -1,0 +1,56 @@
+# brjotskel — Docker Compose
+#
+# Usage:
+#   docker compose up                  # start the pi agent (default)
+#   docker compose run --rm brjotskel  # one-shot interactive agent session
+#   docker compose run --rm shell      # plain bash shell, no agent
+#   docker compose run --rm dev        # agent with .pi/ live-reloaded (no rebuild required)
+#
+# All modes mount logs/ and workspace/ so the intel store and audit logs
+# persist across container restarts.
+#
+# Network:
+#   Default bridge network is fine for outbound SSH/WinRM/TCP connections.
+#   If your targets are on the same host network (lab/local), add:
+#     network_mode: host
+#   to the brjotskel service (or override with COMPOSE_FILE or --network host).
+
+x-brjotskel-base: &brjotskel-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: brjotskel:local
+  stdin_open: true
+  tty: true
+  restart: "no"
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - ./logs:/opt/brjotskel/logs
+    - ./workspace:/opt/brjotskel/workspace
+  working_dir: /opt/brjotskel
+
+services:
+
+  # ── Default: pi agent ─────────────────────────────────────────────────────
+  brjotskel:
+    <<: *brjotskel-base
+
+  # ── Shell: plain bash, no agent ───────────────────────────────────────────
+  # docker compose run --rm shell
+  shell:
+    <<: *brjotskel-base
+    entrypoint: ["/bin/bash"]
+    profiles: [shell]
+
+  # ── Dev: agent with .pi/ live-reloaded ────────────────────────────────────
+  # Extensions and playbooks reflect edits without a rebuild.
+  # docker compose run --rm dev
+  dev:
+    <<: *brjotskel-base
+    volumes:
+      - ./logs:/opt/brjotskel/logs
+      - ./workspace:/opt/brjotskel/workspace
+      - ./.pi:/opt/brjotskel/.pi
+    profiles: [dev]
