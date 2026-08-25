@@ -363,3 +363,79 @@ Required: `type`, `username`, `status`, `source.method`.
 Required: `target`, `status`, `source.method`, plus `chain` list with at least one entry containing `hop`.
 
 `status`: `suspected`, `confirmed`, `active`, `contained`, `blocked`, `cleared`, `inactive`
+
+---
+
+## LSASS dump credentials
+
+After pulling and analysing a dump file with `secretsdump.py`, record each recovered credential:
+
+```bash
+# NTLM hash from LSASS dump
+bin/intel-snippet credential \
+  --id "admin-ntlm-lsass" \
+  --type ntlm-hash \
+  --username Administrator \
+  --domain corp.local \
+  --secret "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0" \
+  --status active \
+  --source-host dc01 \
+  --source-method "lsass-dump (comsvcs.dll MiniDump)" \
+  --source-playbook "windows/lsass-dump.ps1"
+```
+
+Key notes:
+- Domain cached credentials (DCC2) are `ntlm-hash` type with `domain: corp.local`
+- Kerberos tickets pulled from LSASS are `kerberos-tgt` type with `ticket_file:` pointing to extracted `.ccache`
+- WDigest plaintext (if present) is `password` type
+- Remove the dump file from the target immediately after retrieval; note the removal in `intel_timeline`
+
+---
+
+## Cloud identity credentials
+
+### AWS EC2 — attached IAM role
+
+```bash
+bin/intel-snippet cloud-role \
+  --id "ec2-prod-role" \
+  --provider aws \
+  --role-name "EC2-ProdRole-FullS3" \
+  --access-key-id "ASIA..." \
+  --session-token "FQo..." \
+  --expiry "2026-08-25T18:00:00Z" \
+  --source-host web01 \
+  --summary "EC2 IAM role EC2-ProdRole-FullS3 on web01"
+```
+
+### Azure — managed identity
+
+```bash
+bin/intel-snippet cloud-role \
+  --id "azure-mi-webapp" \
+  --provider azure \
+  --role-name "webapp-managed-identity" \
+  --token "<bearer token from IMDS>" \
+  --expiry "2026-08-25T19:00:00Z" \
+  --source-host webapp01 \
+  --summary "Azure managed identity webapp-managed-identity on webapp01"
+```
+
+### GCP — service account
+
+```bash
+bin/intel-snippet cloud-role \
+  --id "gcp-sa-compute" \
+  --provider gcp \
+  --role-name "123456-compute@developer.gserviceaccount.com" \
+  --token "<access_token from metadata service>" \
+  --expiry "2026-08-25T17:30:00Z" \
+  --source-host gce-instance01 \
+  --summary "GCP service account on gce-instance01"
+```
+
+Cloud credential blast radius mapping:
+- AWS: use `aws iam simulate-principal-policy` or enumerate role policies from harness
+- Azure: `az role assignment list --assignee <object-id>` from harness
+- GCP: `gcloud projects get-iam-policy <project>` from harness
+- Record the scope in `notes:` field — this drives pivot decisions

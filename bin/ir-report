@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""ir-report — Generate a structured incident report from the intel store.
+
+Reads workspace/intel/*.yaml and renders a markdown (default) or JSON
+incident summary suitable for handoff or post-incident delivery.
+
+Usage:
+  ir-report                          # markdown to stdout
+  ir-report --format json            # JSON to stdout
+  ir-report --output report.md       # write to file
+  ir-report --intel-dir /path/to/intel
+
+Environment:
+  BRJOTSKEL_INTEL_DIR  — intel store directory (default: workspace/intel)
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("Error: pyyaml is required. Install with: pip3 install pyyaml")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def load_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        return {"_load_error": str(e)}
+
+
+def ts_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def first_ts(timeline: list) -> str:
+    for entry in timeline:
+        if isinstance(entry, dict) and entry.get("ts"):
+            return entry["ts"]
+    return "unknown"
+
+
+def last_ts(timeline: list) -> str:
+    for entry in reversed(timeline):
+        if isinstance(entry, dict) and entry.get("ts"):
+            return entry["ts"]
+    return "unknown"
+
+
+TERMINAL_STATUSES = {"rotated", "expired", "revoked", "disabled", "inactive", "invalid"}
+
+def is_terminal(status: str) -> bool:
+    return str(status or "").lower().strip() in TERMINAL_STATUSES
+
+
+def status_emoji(status: str) -> str:
+    s = str(status or "").lower()
+    return {
+        "compromised": "🔴",
+        "suspected":   "🟡",
+        "contained":   "🟠",
+        "eradicated":  "🟢",
+        "cleared":     "✅",
+        "in-scope":    "🔵",
+        "out-of-scope":"⚪",
+        "active":      "🔴",
+        "unvalidated": "🟡",
+        "rotated":     "✅",
+        "revoked":     "✅",
+    }.get(s, "⚪")
+
+
+# ---------------------------------------------------------------------------
+# Report sections
+# ---------------------------------------------------------------------------
+
+def build_executive_summary(hosts: dict, credentials: dict, accounts: dict,
+                             pivots: dict, timeline: list) -> str:
+    host_statuses: dict[str, int] = {}
+    for h in hosts.values():
+        s = str(h.get("status", "unknown"))
+        host_statuses[s] = host_statuses.get(s, 0) + 1
+
+    cred_statuses: dict[str, int] = {}
+    for c in credentials.values():
+        s = str(c.get("status", "unknown"))
+        cred_statuses[s] = cred_statuses.get(s, 0) + 1
+
+    dirty_hosts = [hid for hid, h in hosts.items()
+                   if h.get("status") in ("compromised", "contained", "suspected")]
+
+    lines = [
+        "## Executive Summary",
+        "",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| Report generated | {ts_now()} |",
+        f"| Investigation start | {first_ts(timeline)} |",
+        f"| Last activity | {last_ts(timeline)} |",
+        f"| Hosts in scope | {len(hosts)} |",
+        f"| Compromised / suspected | {len(dirty_hosts)} |",
+        f"| Credentials recovered | {len(credentials)} |",
+        f"| Accounts of interest | {len(accounts)} |",
+        f"| Pivot paths mapped | {len(pivots)} |",
+        f"| Timeline entries | {len(timeline)} |",
+        "",
+    ]
+
+    if host_statuses:
+        lines.append("**Host status breakdown:** " +
+                     "  ".join(f"`{s}`: {n}" for s, n in sorted(host_statuses.items())))
+        lines.append("")
+
+    if cred_statuses:
+        lines.append("**Credential status breakdown:** " +
+                     "  ".join(f"`{s}`: {n}" for s, n in sorted(cred_statuses.items())))
+        lines.append("")
+
+    # Rotation recommendation
+    needs_rotation = [cid for cid, c in credentials.items() if not is_terminal(c.get("status"))]
+    if needs_rotation:
+        lines.append(f"⚠️  **{len(needs_rotation)} credential(s) require rotation before this incident is closed.**")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_host_inventory(hosts: dict) -> str:
+    if not hosts:
+        return "## Host Inventory\n\n*No hosts recorded.*\n"
+
+    lines = [
+        "## Host Inventory",
+        "",
+        "| ID | IP | Platform | Status | Attacker Role | Notes |",
+        "|----|-----|----------|--------|--------------|-------|",
+    ]
+    for hid, h in sorted(hosts.items()):
+        ip = h.get("ip") or h.get("hostname") or "—"
+        platform = h.get("platform") or "—"
+        status = h.get("status") or "—"
+        attacker_role = h.get("attacker_role") or "—"
+        notes = str(h.get("notes") or "").replace("\n", " ").replace("|", "\\|")[:80]
+        lines.append(
+            f"| `{hid}` | {ip} | {platform} | {status_emoji(status)} {status} "
+            f"| {attacker_role} | {notes} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_credential_chain(credentials: dict, hosts: dict) -> str:
+    if not credentials:
+        return "## Credential Chain\n\n*No credentials recorded.*\n"
+
+    lines = [
+        "## Credential Chain",
+        "",
+        "| ID | Type | Username | Recovered From | Valid On | Status |",
+        "|----|------|----------|----------------|----------|--------|",
+    ]
+    for cid, c in sorted(credentials.items()):
+        ctype = c.get("type") or "—"
+        username = c.get("username") or "—"
+        if c.get("domain"):
+            username = f"{c['domain']}\\{username}"
+        source_host = (c.get("source") or {}).get("host") or "—"
+        valid_on = ", ".join(c.get("valid_on") or []) or "—"
+        status = c.get("status") or "—"
+        lines.append(
+            f"| `{cid}` | {ctype} | {username} | {source_host} | {valid_on} "
+            f"| {status_emoji(status)} {status} |"
+        )
+    lines.append("")
+
+    # Rotation section
+    needs_rotation = {cid: c for cid, c in credentials.items() if not is_terminal(c.get("status"))}
+    if needs_rotation:
+        lines.append("### Required rotations")
+        lines.append("")
+        for cid, c in sorted(needs_rotation.items()):
+            username = c.get("username") or "unknown"
+            if c.get("domain"):
+                username = f"{c['domain']}\\{username}"
+            lines.append(f"- **`{cid}`** — {c.get('type', '?')} for `{username}` "
+                         f"(valid on: {', '.join(c.get('valid_on') or []) or 'unvalidated'})")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_accounts(accounts: dict) -> str:
+    if not accounts:
+        return ""
+
+    lines = [
+        "## Accounts of Interest",
+        "",
+        "| ID | Type | Username | Domain | Status | Attacker Use |",
+        "|----|------|----------|--------|--------|-------------|",
+    ]
+    for aid, a in sorted(accounts.items()):
+        atype = a.get("type") or "—"
+        username = a.get("username") or "—"
+        domain = a.get("domain") or "—"
+        status = a.get("status") or "—"
+        attacker_use = str(a.get("attacker_use") or "—")[:60]
+        lines.append(
+            f"| `{aid}` | {atype} | {username} | {domain} "
+            f"| {status_emoji(status)} {status} | {attacker_use} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_pivots(pivots: dict) -> str:
+    if not pivots:
+        return ""
+
+    lines = ["## Pivot Paths", ""]
+    for pid, p in sorted(pivots.items()):
+        target = p.get("target") or pid
+        status = p.get("status") or "—"
+        chain = p.get("chain") or []
+        hop_str = " → ".join(
+            (h.get("hop") or "?") + (f" ({h.get('method')})" if h.get("method") else "")
+            for h in chain if isinstance(h, dict)
+        )
+        lines.append(f"- **`{pid}`** → `{target}` | {status_emoji(status)} {status}")
+        if hop_str:
+            lines.append(f"  - Chain: {hop_str}")
+        if p.get("notes"):
+            lines.append(f"  - Notes: {p['notes']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_timeline(timeline: list) -> str:
+    if not timeline:
+        return "## Timeline\n\n*No timeline entries recorded.*\n"
+
+    lines = [
+        "## Timeline",
+        "",
+        "| Timestamp | Type | Action | Target | Summary |",
+        "|-----------|------|--------|--------|---------|",
+    ]
+    for entry in timeline:
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get("ts") or entry.get("timestamp") or "—"
+        etype = entry.get("type") or "—"
+        action = entry.get("action") or "—"
+        target = entry.get("target") or "—"
+        summary = str(entry.get("summary") or "—").replace("|", "\\|")[:100]
+        lines.append(f"| {ts} | {etype} | {action} | `{target}` | {summary} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Assemble report
+# ---------------------------------------------------------------------------
+
+def build_markdown_report(intel_dir: Path) -> str:
+    hosts_raw       = load_yaml(intel_dir / "hosts.yaml")
+    creds_raw       = load_yaml(intel_dir / "credentials.yaml")
+    accounts_raw    = load_yaml(intel_dir / "accounts.yaml")
+    pivots_raw      = load_yaml(intel_dir / "pivots.yaml")
+    timeline_raw    = load_yaml(intel_dir / "timeline.yaml")
+
+    hosts       = hosts_raw.get("hosts", {})
+    credentials = creds_raw.get("credentials", {})
+    accounts    = accounts_raw.get("accounts", {})
+    pivots      = pivots_raw.get("paths", {})
+    timeline    = timeline_raw.get("timeline", [])
+
+    if not isinstance(hosts, dict):       hosts = {}
+    if not isinstance(credentials, dict): credentials = {}
+    if not isinstance(accounts, dict):    accounts = {}
+    if not isinstance(pivots, dict):      pivots = {}
+    if not isinstance(timeline, list):    timeline = []
+
+    parts = [
+        "# Incident Report",
+        f"\n*Generated by `ir-report` at {ts_now()}*\n",
+        "---\n",
+        build_executive_summary(hosts, credentials, accounts, pivots, timeline),
+        "---\n",
+        build_host_inventory(hosts),
+        "---\n",
+        build_credential_chain(credentials, hosts),
+    ]
+
+    acct_section = build_accounts(accounts)
+    if acct_section:
+        parts += ["---\n", acct_section]
+
+    pivot_section = build_pivots(pivots)
+    if pivot_section:
+        parts += ["---\n", pivot_section]
+
+    parts += [
+        "---\n",
+        build_timeline(timeline),
+    ]
+
+    return "\n".join(parts)
+
+
+def build_json_report(intel_dir: Path) -> str:
+    hosts_raw       = load_yaml(intel_dir / "hosts.yaml")
+    creds_raw       = load_yaml(intel_dir / "credentials.yaml")
+    accounts_raw    = load_yaml(intel_dir / "accounts.yaml")
+    pivots_raw      = load_yaml(intel_dir / "pivots.yaml")
+    timeline_raw    = load_yaml(intel_dir / "timeline.yaml")
+
+    report = {
+        "generated_at": ts_now(),
+        "hosts":        hosts_raw.get("hosts", {}),
+        "credentials":  creds_raw.get("credentials", {}),
+        "accounts":     accounts_raw.get("accounts", {}),
+        "pivots":       pivots_raw.get("paths", {}),
+        "timeline":     timeline_raw.get("timeline", []),
+    }
+    return json.dumps(report, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate an incident report from the brjotskel intel store.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--format", choices=["md", "json"], default="md",
+        help="Output format: md (markdown, default) or json",
+    )
+    parser.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="Write report to FILE instead of stdout",
+    )
+    parser.add_argument(
+        "--intel-dir", metavar="DIR",
+        default=os.environ.get("BRJOTSKEL_INTEL_DIR", "workspace/intel"),
+        help="Path to intel store directory (default: workspace/intel or $BRJOTSKEL_INTEL_DIR)",
+    )
+    args = parser.parse_args()
+
+    intel_dir = Path(args.intel_dir)
+    if not intel_dir.exists():
+        sys.exit(f"Error: intel store directory not found: {intel_dir}\n"
+                 f"Mount workspace/ or set BRJOTSKEL_INTEL_DIR.")
+
+    if args.format == "json":
+        output = build_json_report(intel_dir)
+    else:
+        output = build_markdown_report(intel_dir)
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.write_text(output, encoding="utf-8")
+        print(f"Report written to: {out_path}", file=sys.stderr)
+    else:
+        print(output)
+
+
+if __name__ == "__main__":
+    main()

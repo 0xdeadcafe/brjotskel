@@ -398,3 +398,7 @@ export function processTelnetBytes(state: TelnetState | undefined, data: Buffer 
 
   return { text: Buffer.from(out).toString(), replies, state: nextState };
 }
+
+export function buildRelayDescription(method: RelayMethod, sessionName: string, listenPort: number, targetHost: string, targetPort: number): string {
+  return `${method} relay on ${sessionName}: :${listenPort} → ${targetHost}:${targetPort}`;
+}

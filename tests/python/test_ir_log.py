@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -75,6 +76,76 @@ class IrLogTests(unittest.TestCase):
             self.assertEqual(len(lines), 2)
             self.assertTrue(lines[0].endswith(r"event=first\ action"))
             self.assertTrue(lines[1].endswith(r"event=second\ action"))
+
+    def test_jsonl_format_emits_valid_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = os.environ.copy()
+            env["BRJOTSKEL_LOG_DIR"] = tmpdir
+            env["USER"] = "unit-tester"
+            env["BRJOTSKEL_LOG_FORMAT"] = "jsonl"
+
+            subprocess.run(
+                ["bash", str(SCRIPT), "netexec smb 10.10.0.0/24"],
+                cwd=REPO_ROOT,
+                env=env,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            log_file = next(Path(tmpdir).glob("audit-*.log"))
+            lines = [l for l in log_file.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)
+            entry = json.loads(lines[0])
+            self.assertIn("ts", entry)
+            self.assertEqual(entry["operator"], "unit-tester")
+            self.assertIn("host", entry)
+            self.assertEqual(entry["event"], "netexec smb 10.10.0.0/24")
+            self.assertNotIn("auth", entry)  # no auth context set
+
+    def test_jsonl_includes_auth_context_when_set(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = os.environ.copy()
+            env["BRJOTSKEL_LOG_DIR"] = tmpdir
+            env["USER"] = "unit-tester"
+            env["BRJOTSKEL_LOG_FORMAT"] = "jsonl"
+            env["BRJOTSKEL_AUTH_CONTEXT"] = "corp/alice"
+
+            subprocess.run(
+                ["bash", str(SCRIPT), "pivot to dc01"],
+                cwd=REPO_ROOT,
+                env=env,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            log_file = next(Path(tmpdir).glob("audit-*.log"))
+            entry = json.loads(log_file.read_text().strip())
+            self.assertEqual(entry["auth"], "corp/alice")
+            self.assertEqual(entry["event"], "pivot to dc01")
+
+    def test_jsonl_event_with_special_characters(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = os.environ.copy()
+            env["BRJOTSKEL_LOG_DIR"] = tmpdir
+            env["BRJOTSKEL_LOG_FORMAT"] = "jsonl"
+
+            subprocess.run(
+                ["bash", str(SCRIPT), 'found key: "secret\\nwith newline"'],
+                cwd=REPO_ROOT,
+                env=env,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            log_file = next(Path(tmpdir).glob("audit-*.log"))
+            entry = json.loads(log_file.read_text().strip())
+            # json.loads round-trip confirms valid JSON
+            self.assertIn("found key", entry["event"])
+
+
 
 
 if __name__ == "__main__":

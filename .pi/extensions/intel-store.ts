@@ -25,7 +25,7 @@ import { Type } from "typebox";
 import { normalizeIntelEntry, validateIntelEntry, validateIntelStatusTransition, resolveStoredPath, resolveIntelDir } from "./lib/intel-helpers.ts";
 import { ensurePrivateDir, ensurePrivateFile, hardenExistingPrivateFiles } from "./lib/intel-permissions.ts";
 import { parseYaml as parseYamlDocument, dumpYaml } from "./lib/simple-yaml.ts";
-import { getFileMap, getCollectionKeyMap, addIntelRecord, updateIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary, isInactiveCredentialStatus, timelineActionForIntelUpdate } from "./lib/intel-store-core.ts";
+import { getFileMap, getCollectionKeyMap, addIntelRecord, updateIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary, buildIntelMap, filterTimeline, isInactiveCredentialStatus, timelineActionForIntelUpdate } from "./lib/intel-store-core.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -145,8 +145,47 @@ export default function (pi: ExtensionAPI) {
         return Object.keys(updatedStore[key]).length;
       });
 
+      // For credentials: surface a validation hint if known hosts exist
+      let validationHint = "";
+      if (params.category === "credential") {
+        try {
+          const hosts = readYaml(join(intelDir, "hosts.yaml")).hosts || {};
+          const hostIps = Object.values(hosts as Record<string, any>)
+            .map((h: any) => h?.ip)
+            .filter((ip): ip is string => typeof ip === "string" && ip.length > 0);
+          if (hostIps.length > 0) {
+            const cred = entryData;
+            const username = cred.username || "?";
+            const ipList = hostIps.slice(0, 4).join(",");
+            const ipNote = hostIps.length > 4 ? ` (and ${hostIps.length - 4} more)` : "";
+            let cmd = "";
+            switch (cred.type) {
+              case "ntlm-hash":
+                cmd = `netexec smb ${ipList} -u ${username} -H <hash from intel_get_cred(id="${params.id}")> --no-bruteforce`;
+                break;
+              case "password":
+                cmd = `netexec smb ${ipList} -u ${username} -p '<password from intel_get_cred(id="${params.id}")>' --no-bruteforce`;
+                break;
+              case "ssh-key":
+              case "private-key":
+                cmd = `netexec ssh ${ipList} -u ${username} --key-file <key_file from intel_get_cred(id="${params.id}")>`;
+                break;
+              case "kerberos-tgt":
+              case "kerberos-tgs":
+                cmd = `netexec smb ${ipList} -u ${username} --use-kcache  # set KRB5CCNAME first`;
+                break;
+              default:
+                cmd = `netexec smb ${ipList} -u ${username} -p '<secret from intel_get_cred(id="${params.id}")>'`;
+            }
+            validationHint = `\n\n💡 Validate against ${hostIps.length} known host(s)${ipNote}:\n  ${cmd}`;
+          }
+        } catch {
+          // hint is best-effort — never fail the add
+        }
+      }
+
       return {
-        content: [{ type: "text", text: `${params.overwrite === true ? "Updated" : "Added"} ${params.category} '${params.id}' in intel store.\nFile: ${filePath}\nTotal ${key}: ${total}` }],
+        content: [{ type: "text", text: `${params.overwrite === true ? "Updated" : "Added"} ${params.category} '${params.id}' in intel store.\nFile: ${filePath}\nTotal ${key}: ${total}${validationHint}` }],
         details: { category: params.category, id: params.id, file: filePath },
       };
     },
@@ -423,6 +462,10 @@ export default function (pi: ExtensionAPI) {
       target: Type.Optional(Type.String({ description: "What this entry is about" })),
       summary: Type.Optional(Type.String({ description: "One-line summary" })),
       count: Type.Optional(Type.Number({ description: "Number of recent entries to show (default: 20)" })),
+      filter_host: Type.Optional(Type.String({ description: "Filter view to entries mentioning this host ID or target" })),
+      filter_category: Type.Optional(StringEnum(["host", "credential", "account", "persistence", "c2", "pivot", "eradication", "containment"] as const, { description: "Filter view to this entry type" })),
+      filter_action: Type.Optional(StringEnum(["discovered", "confirmed", "accessed", "updated", "eradicated", "rotated", "contained", "cleared"] as const, { description: "Filter view to this action" })),
+      filter_since: Type.Optional(Type.String({ description: "Filter view to entries at or after this ISO datetime, e.g. 2026-08-25T10:00:00Z" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -452,18 +495,27 @@ export default function (pi: ExtensionAPI) {
           details: { total: timeline.timeline.length },
         };
       } else {
-        // View recent
+        // View recent (with optional filters)
+        const allEntries: any[] = timeline.timeline || [];
+        const filtered = filterTimeline(allEntries, {
+          host:     params.filter_host,
+          category: params.filter_category,
+          action:   params.filter_action,
+          since:    params.filter_since,
+        });
         const count = params.count || 20;
-        const recent = timeline.timeline.slice(-count);
+        const recent = filtered.slice(-count);
+        const hasFilters = params.filter_host || params.filter_category || params.filter_action || params.filter_since;
         if (recent.length === 0) {
-          return { content: [{ type: "text", text: "Timeline is empty." }], details: {} };
+          return { content: [{ type: "text", text: hasFilters ? "No timeline entries match the filter criteria." : "Timeline is empty." }], details: {} };
         }
+        const filterDesc = hasFilters ? ` [filtered${params.filter_host ? ` host=${params.filter_host}` : ""}${params.filter_category ? ` type=${params.filter_category}` : ""}${params.filter_action ? ` action=${params.filter_action}` : ""}${params.filter_since ? ` since=${params.filter_since}` : ""}]` : "";
         const lines = recent.map((e: any) =>
           `[${e.timestamp}] ${e.type}/${e.action} — ${e.target}: ${e.summary} (${e.operator})`
         );
         return {
-          content: [{ type: "text", text: `=== Timeline (last ${recent.length} of ${timeline.timeline.length}) ===\n${lines.join("\n")}` }],
-          details: { shown: recent.length, total: timeline.timeline.length },
+          content: [{ type: "text", text: `=== Timeline (last ${recent.length} of ${filtered.length}${filtered.length !== allEntries.length ? ` matching, ${allEntries.length} total` : ""})${filterDesc} ===\n${lines.join("\n")}` }],
+          details: { shown: recent.length, matched: filtered.length, total: allEntries.length },
         };
       }
     },
@@ -496,6 +548,35 @@ export default function (pi: ExtensionAPI) {
           accounts: Object.keys(accounts).length,
           pivots: Object.keys(pivots).length,
           timeline: timeline.length,
+        },
+      };
+    },
+  });
+
+  // -------------------------------------------------------------------
+  // Tool: intel_map
+  // -------------------------------------------------------------------
+  pi.registerTool({
+    name: "intel_map",
+    label: "Intel Map",
+    description: "Render a text-format attack graph: hosts by status, credential blast radius (valid_on), accounts, and pivot chains. Shows the threat shape at a glance.",
+    promptSnippet: "Render text-format attack graph: blast radius, credential edges, pivot chains",
+    parameters: Type.Object({}),
+
+    async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+      const intelDir = getIntelDir();
+      const hosts       = readYaml(join(intelDir, "hosts.yaml")).hosts       || {};
+      const credentials = readYaml(join(intelDir, "credentials.yaml")).credentials || {};
+      const accounts    = readYaml(join(intelDir, "accounts.yaml")).accounts    || {};
+      const pivots      = readYaml(join(intelDir, "pivots.yaml")).paths         || {};
+      const map = buildIntelMap(hosts, credentials, accounts, pivots);
+      return {
+        content: [{ type: "text", text: map }],
+        details: {
+          hosts: Object.keys(hosts).length,
+          credentials: Object.keys(credentials).length,
+          accounts: Object.keys(accounts).length,
+          pivots: Object.keys(pivots).length,
         },
       };
     },

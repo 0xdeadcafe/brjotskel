@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# ir-search — Interactive fuzzy search across audit and session logs.
+#
+# Uses fzf with a preview pane for fast incident timeline reconstruction:
+#   "when did I run that netexec sweep?"
+#   "which session logged the shadow file output?"
+#
+# Usage:
+#   ir-search                    # search all logs with fzf
+#   ir-search audit              # audit logs only
+#   ir-search sessions           # session command logs only
+#   ir-search <grep-pattern>     # pre-filter then fzf
+#
+# Environment:
+#   BRJOTSKEL_LOG_DIR — log directory (default: logs)
+#
+# Requires: fzf (installed in container), rg or grep
+set -euo pipefail
+
+log_dir="${BRJOTSKEL_LOG_DIR:-logs}"
+mode="${1:-all}"
+
+if ! command -v fzf >/dev/null 2>&1; then
+  echo "fzf not found. Install with: apt-get install fzf" >&2
+  exit 1
+fi
+
+# Collect log files to search
+audit_logs=()
+session_logs=()
+
+if [[ -d "$log_dir" ]]; then
+  mapfile -t audit_logs   < <(find "$log_dir" -maxdepth 1 -name "audit-*.log"  | sort)
+  mapfile -t session_logs < <(find "$log_dir/remote-sessions" -name "*.log" 2>/dev/null | sort)
+fi
+
+if [[ "${#audit_logs[@]}" -eq 0 && "${#session_logs[@]}" -eq 0 ]]; then
+  echo "No log files found in $log_dir"
+  exit 0
+fi
+
+# Build file list based on mode
+files=()
+case "$mode" in
+  audit)    files=("${audit_logs[@]}") ;;
+  sessions) files=("${session_logs[@]}") ;;
+  all)      files=("${audit_logs[@]}" "${session_logs[@]}") ;;
+  *)
+    # Treat as grep pre-filter across all logs
+    all_files=("${audit_logs[@]}" "${session_logs[@]}")
+    if [[ "${#all_files[@]}" -gt 0 ]]; then
+      grep -h "$mode" "${all_files[@]}" 2>/dev/null | \
+        fzf --ansi --no-sort --reverse --tac \
+            --prompt="ir-search> " \
+            --header="Filtered: $mode  |  Enter to copy  |  Ctrl-C to exit" \
+            --preview 'echo {}' --preview-window=down:3:wrap
+    fi
+    exit 0
+    ;;
+esac
+
+if [[ "${#files[@]}" -eq 0 ]]; then
+  echo "No matching log files for mode: $mode"
+  exit 0
+fi
+
+# FZF with file+line preview showing context
+# Use rg for speed if available, otherwise grep
+if command -v rg >/dev/null 2>&1; then
+  search_cmd="rg --no-filename --color always {q}"
+else
+  search_cmd="grep --color=always {q}"
+fi
+
+# Annotate each line with its source file for context
+{
+  for f in "${files[@]}"; do
+    label=$(basename "$f")
+    while IFS= read -r line; do
+      printf '%s  %s\n' "$label" "$line"
+    done < "$f"
+  done
+} | fzf \
+    --ansi \
+    --no-sort \
+    --reverse \
+    --tac \
+    --prompt="ir-search> " \
+    --header="$mode logs  |  Tab=select  |  Enter=copy to clipboard  |  Ctrl-C=exit" \
+    --preview 'echo {}' \
+    --preview-window=down:3:wrap \
+    --bind 'enter:execute(echo {} | xclip -selection clipboard 2>/dev/null || echo {} | pbcopy 2>/dev/null || echo {})+abort'

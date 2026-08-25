@@ -1,6 +1,9 @@
 FROM debian:bookworm-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
+LABEL version="0.3.0" \
+      description="AI-native incident response harness" \
+      maintainer="brjotskel"
 
 # --- Base system packages ---
 RUN apt-get update \
@@ -18,6 +21,7 @@ RUN apt-get update \
         git \
         ripgrep \
         fd-find \
+        fzf \
         python3 \
         python3-pip \
         python3-yaml \
@@ -71,9 +75,11 @@ RUN npm install -g @earendil-works/pi-coding-agent
 WORKDIR /opt/brjotskel
 
 COPY bin/ /opt/brjotskel/bin/
-RUN chmod +x /opt/brjotskel/bin/ir-log /opt/brjotskel/bin/intel-snippet /opt/brjotskel/bin/test /opt/brjotskel/bin/smoke-check \
+RUN chmod +x /opt/brjotskel/bin/ir-log /opt/brjotskel/bin/intel-snippet /opt/brjotskel/bin/ir-search /opt/brjotskel/bin/ir-report /opt/brjotskel/bin/test /opt/brjotskel/bin/smoke-check \
     && ln -sf /opt/brjotskel/bin/ir-log /usr/local/bin/ir-log \
-    && ln -sf /opt/brjotskel/bin/intel-snippet /usr/local/bin/intel-snippet
+    && ln -sf /opt/brjotskel/bin/intel-snippet /usr/local/bin/intel-snippet \
+    && ln -sf /opt/brjotskel/bin/ir-search /usr/local/bin/ir-search \
+    && ln -sf /opt/brjotskel/bin/ir-report /usr/local/bin/ir-report
 
 COPY CONSTITUTION.md README.md /opt/brjotskel/
 COPY docs/ /opt/brjotskel/docs/

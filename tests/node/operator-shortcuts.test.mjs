@@ -43,17 +43,44 @@ test('formatAssessShortcut selects platform-specific playbooks', () => {
 
 test('formatPursueShortcut stays lightweight and intel-focused', () => {
   const output = formatPursueShortcut([linuxSession, windowsSession]);
-  assert.match(output, /intel_summary\(\)/);
   assert.match(output, /intel_get_cred/);
-  assert.match(output, /remote_tunnel/);
+  assert.match(output, /intel_map/);
+  assert.match(output, /netexec/);
   assert.doesNotMatch(output, /report/i);
+});
+
+test('formatPursueShortcut generates chase board from intel snapshot', () => {
+  const snap = {
+    unvalidatedCreds: [
+      { id: 'admin-ntlm', type: 'ntlm-hash', username: 'Administrator' },
+      { id: 'deploy-key', type: 'ssh-key',   username: 'deploy', keyFile: 'keys/deploy-ed25519' },
+    ],
+    activeCreds: [],
+    knownHostIps: ['10.10.10.5', '10.10.10.20'],
+    knownHostIds: ['web01', 'dc01'],
+  };
+  const output = formatPursueShortcut([linuxSession], snap);
+  assert.match(output, /UNVALIDATED CREDENTIALS/);
+  assert.match(output, /admin-ntlm/);
+  assert.match(output, /deploy-key/);
+  assert.match(output, /10.10.10.5,10.10.10.20/);
+  assert.match(output, /intel_update.*valid_on/);
+});
+
+test('formatPursueShortcut shows fallback when no intel', () => {
+  const output = formatPursueShortcut([linuxSession], null);
+  assert.match(output, /Manual commands/);
+  assert.doesNotMatch(output, /UNVALIDATED/);
 });
 
 test('formatContainShortcut is evidence-first and does not auto-execute', () => {
   const output = formatContainShortcut(windowsSession, [windowsSession]);
-  assert.match(output, /Evidence-first containment/);
-  assert.match(output, /Stop-Process/);
-  assert.match(output, /intel_timeline/);
+  assert.match(output, /EVIDENCE FIRST/);
+  assert.match(output, /collect-evidence/);
+  assert.match(output, /kill-process\.ps1/);
+  assert.match(output, /block-c2\.ps1/);
+  assert.match(output, /disable-account\.ps1/);
+  assert.match(output, /intel_update/);
 });
 
 test('buildAssessPrompt stages an agent prompt rather than executing directly', () => {

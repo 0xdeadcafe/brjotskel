@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 step=1
 announce() {
-  echo "[$step/6] $*"
+  echo "[$step/7] $*"
   step=$((step + 1))
 }
 
@@ -77,6 +77,27 @@ if rg -n "BRJOTSKEL_AUTH_CONTEXT|ensureAuthContext" .pi/extensions/remote-sessio
 fi
 if rg -n "crackmapexec|CrackMapExec" README.md docs .pi/extensions .pi/skills >/dev/null; then
   echo "Found stale CrackMapExec references; use netexec consistently"
+  exit 1
+fi
+
+announce "shebang executable bit check"
+missing_x=0
+mapfile -t shebang_scripts < <(
+  git ls-files | while IFS= read -r path; do
+    [[ -f "$path" ]] || continue
+    first_line=$(head -n 1 "$path" 2>/dev/null || true)
+    [[ "$first_line" =~ ^#! ]] || continue
+    printf '%s\n' "$path"
+  done | sort -u
+)
+for script in "${shebang_scripts[@]}"; do
+  if [[ ! -x "$script" ]]; then
+    echo "Missing +x: $script"
+    missing_x=$((missing_x + 1))
+  fi
+done
+if ((missing_x > 0)); then
+  echo "$missing_x shebang script(s) missing executable bit. Run: git ls-files | xargs -I{} bash -c 'head -1 {} | grep -q \"^#!\" && chmod +x {}'"
   exit 1
 fi
 

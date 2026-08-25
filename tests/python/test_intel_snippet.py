@@ -145,6 +145,74 @@ class IntelSnippetTests(unittest.TestCase):
         self.assertEqual(kwargs["summary"], "quoted \"summary\" with \\ slash\nand newline")
         self.assertEqual(yaml.safe_load(kwargs["data"])["secret"], "true")
 
+    def test_kerberos_ticket_tgs_with_cracked_password(self):
+        out = run_snippet(
+            'kerberos-ticket',
+            '--id', 'svc-sql-tgs',
+            '--username', 'svc_sql',
+            '--domain', 'corp.local',
+            '--ticket-type', 'tgs',
+            '--spn', 'MSSQLSvc/sql01.corp.local:1433',
+            '--cracked-password', 'Winter2024!',
+            '--source-host', 'dc01',
+        )
+        data = yaml.safe_load(extract_yaml_block(out))
+        self.assertEqual(data['type'], 'kerberos-tgs')
+        self.assertEqual(data['username'], 'svc_sql')
+        self.assertEqual(data['domain'], 'corp.local')
+        self.assertEqual(data['secret'], 'Winter2024!')
+        self.assertIn('MSSQLSvc', data.get('notes', ''))
+        kwargs = extract_intel_add_kwargs(out)
+        self.assertEqual(kwargs['category'], 'credential')
+        self.assertEqual(kwargs['id'], 'svc-sql-tgs')
+
+    def test_kerberos_ticket_asrep_no_crack(self):
+        out = run_snippet(
+            'kerberos-ticket',
+            '--id', 'svc-backup-asrep',
+            '--username', 'svc_backup',
+            '--domain', 'corp.local',
+            '--ticket-type', 'asrep',
+            '--ticket-file', 'workspace/intel/tickets/svc_backup.ccache',
+            '--source-host', 'dc01',
+        )
+        data = yaml.safe_load(extract_yaml_block(out))
+        self.assertEqual(data['type'], 'kerberos-tgt')
+        self.assertNotIn('secret', data)
+        self.assertEqual(data['ticket_file'], 'workspace/intel/tickets/svc_backup.ccache')
+
+    def test_cloud_role_aws(self):
+        out = run_snippet(
+            'cloud-role',
+            '--id', 'ec2-prod-role',
+            '--provider', 'aws',
+            '--role-name', 'EC2-ProdRole-FullS3',
+            '--access-key-id', 'ASIAIOSFODNN7EXAMPLE',
+            '--secret-access-key', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+            '--expiry', '2026-08-25T18:00:00Z',
+            '--source-host', 'web01',
+        )
+        data = yaml.safe_load(extract_yaml_block(out))
+        self.assertEqual(data['type'], 'token')
+        self.assertEqual(data['username'], 'EC2-ProdRole-FullS3')
+        self.assertIn('ASIAIOSFODNN7EXAMPLE', data['secret'])
+        self.assertIn('aws', data['notes'].lower())
+        kwargs = extract_intel_add_kwargs(out)
+        self.assertEqual(kwargs['category'], 'credential')
+
+    def test_cloud_role_azure(self):
+        out = run_snippet(
+            'cloud-role',
+            '--id', 'azure-mi-webapp',
+            '--provider', 'azure',
+            '--role-name', 'webapp-managed-identity',
+            '--token', 'eyJ0eXAiOiJKV1Qi...',
+            '--source-host', 'webapp01',
+        )
+        data = yaml.safe_load(extract_yaml_block(out))
+        self.assertEqual(data['type'], 'token')
+        self.assertIn('azure', data['notes'].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

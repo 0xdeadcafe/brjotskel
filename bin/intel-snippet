@@ -391,6 +391,68 @@ def cmd_cifs_pivot(args):
     print_result('pivot', args.id, data, args.summary or f'CIFS-derived pivot recorded: {args.id}')
 
 
+def cmd_kerberos_ticket(args):
+    data = {
+        'type': 'kerberos-tgs' if args.ticket_type == 'tgs' else 'kerberos-tgt',
+        'username': args.username,
+        'domain': args.domain,
+        'status': args.status,
+        'notes': args.notes or (
+            f'Kerberoastable SPN: {args.spn}' if args.spn else
+            f'AS-REP roastable user: {args.username}' if args.ticket_type == 'asrep' else
+            'Kerberos ticket'
+        ),
+    }
+    if args.ticket_file:
+        data['ticket_file'] = args.ticket_file
+    if args.cracked_password:
+        data['secret'] = args.cracked_password
+        data['notes'] = (data.get('notes', '') + ' — plaintext password cracked').strip(' —')
+    if args.spn:
+        data['notes'] = data.get('notes', '') or f'SPN: {args.spn}'
+    args.source_method = args.source_method or (
+        'GetUserSPNs.py (kerberoasting)' if args.ticket_type in ('tgs', 'spn') else
+        'GetNPUsers.py (AS-REP roast)' if args.ticket_type == 'asrep' else
+        'Kerberos ticket recovery'
+    )
+    args.source_playbook = args.source_playbook or 'windows/enum-ad-spns.ps1'
+    add_common_source(data, args)
+    label = f'{args.username}@{args.domain}' if args.domain else args.username
+    ticket_kind = {'tgs': 'TGS (Kerberoast)', 'tgt': 'TGT', 'asrep': 'AS-REP hash'}.get(args.ticket_type, args.ticket_type)
+    print_result('credential', args.id, data,
+                 args.summary or f'{ticket_kind} for {label} — {"cracked" if args.cracked_password else "captured"}')
+
+
+def cmd_cloud_role(args):
+    data = {
+        'type': 'token',
+        'username': args.role_name,
+        'status': args.status,
+        'notes': args.notes or (
+            f'{args.provider.upper()} IAM role {args.role_name} attached to {args.source_host or "instance"}'
+        ),
+    }
+    if args.access_key_id and args.secret_access_key:
+        data['secret'] = f'{args.access_key_id}/{args.secret_access_key}' + (
+            f'/{args.session_token}' if args.session_token else ''
+        )
+    elif args.token:
+        data['secret'] = args.token
+    if args.expiry:
+        data['notes'] = (data.get('notes') or '') + f' — expires {args.expiry}'
+    if args.provider == 'aws':
+        data['notes'] = (data.get('notes') or '') + f' — blast radius = role policies in AWS account'
+    elif args.provider == 'azure':
+        data['notes'] = (data.get('notes') or '') + ' — blast radius = managed identity RBAC scope'
+    elif args.provider == 'gcp':
+        data['notes'] = (data.get('notes') or '') + ' — blast radius = service account IAM bindings'
+    args.source_method = args.source_method or f'{args.provider.upper()} IMDS query'
+    args.source_playbook = args.source_playbook or 'linux/enum-cloud-credentials.sh'
+    add_common_source(data, args)
+    print_result('credential', args.id, data,
+                 args.summary or f'{args.provider.upper()} cloud identity {args.role_name} on {args.source_host or "instance"}')
+
+
 def main():
     p = argparse.ArgumentParser(description='Generate ready intel_add snippets from gather-playbook findings.')
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -603,6 +665,33 @@ def main():
     piv.add_argument('--evidence-host')
     piv.add_argument('--evidence-path')
     piv.set_defaults(func=cmd_pivot)
+
+    krb = sub.add_parser('kerberos-ticket', parents=[common],
+                         help='Kerberoast TGS, AS-REP hash, or TGT — with optional cracked plaintext')
+    krb.add_argument('--id', required=True)
+    krb.add_argument('--username', required=True)
+    krb.add_argument('--domain')
+    krb.add_argument('--ticket-type', choices=['tgs', 'tgt', 'asrep'], default='tgs')
+    krb.add_argument('--spn')
+    krb.add_argument('--ticket-file')
+    krb.add_argument('--cracked-password', help='Plaintext if cracked from hashcat/john')
+    krb.add_argument('--status', default='active')
+    krb.add_argument('--notes')
+    krb.set_defaults(func=cmd_kerberos_ticket)
+
+    cld = sub.add_parser('cloud-role', parents=[common],
+                         help='Cloud IAM role / managed identity attached to a compromised instance')
+    cld.add_argument('--id', required=True)
+    cld.add_argument('--provider', choices=['aws', 'azure', 'gcp'], required=True)
+    cld.add_argument('--role-name', required=True)
+    cld.add_argument('--access-key-id')
+    cld.add_argument('--secret-access-key')
+    cld.add_argument('--session-token')
+    cld.add_argument('--token', help='Azure/GCP bearer token')
+    cld.add_argument('--expiry')
+    cld.add_argument('--status', default='active')
+    cld.add_argument('--notes')
+    cld.set_defaults(func=cmd_cloud_role)
 
     args = p.parse_args()
     args.func(args)

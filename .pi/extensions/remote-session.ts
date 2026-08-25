@@ -59,100 +59,27 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
 import { chooseSessionName, buildMarkerCommand, buildTunnelSshArgs, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseHostPortTarget, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, relayVerifyOutputConfirmsListening, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
-import { parseShortcutArgs, formatLandShortcut, formatAssessShortcut, formatPursueShortcut, formatContainShortcut, formatEradicateShortcut, formatVerifyShortcut, buildAssessPrompt, buildPursuePrompt, buildContainPrompt, buildEradicatePrompt, buildVerifyPrompt, type OperatorSessionSummary } from "./lib/operator-shortcuts.ts";
+import { parseShortcutArgs, formatLandShortcut, formatAssessShortcut, formatPursueShortcut, formatContainShortcut, formatEradicateShortcut, formatVerifyShortcut, buildAssessPrompt, buildPursuePrompt, buildContainPrompt, buildEradicatePrompt, buildVerifyPrompt, type OperatorSessionSummary, type PursueIntelSnapshot } from "./lib/operator-shortcuts.ts";
+import { parseYaml } from "./lib/simple-yaml.ts";
+import { resolveIntelDir } from "./lib/intel-helpers.ts";
+import { buildIntelMap } from "./lib/intel-store-core.ts";
+import { type Protocol, type TunnelType, type SessionInfo, type RemoteSession, type TunnelInfo, type RelayInfo, MARKER_PREFIX, MARKER_SUFFIX, COMMAND_TIMEOUT_MS, generateMarker, generateId, killTrackedProcess, logToSession as _logToSession, getLogPath as _getLogPath } from "./lib/remote-types.ts";
+import { connectSSH } from "./lib/protocol-adapters/ssh.ts";
+import { connectWinRM } from "./lib/protocol-adapters/winrm.ts";
+import { connectTCP, connectTelnet } from "./lib/protocol-adapters/tcp-telnet.ts";
+import { spawnSSHTunnel, closeTunnel, closeAllTunnels } from "./lib/tunnel-manager.ts";
+import { setupRelay, teardownRelay } from "./lib/relay-manager.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 
 // -------------------------------------------------------------------
-// Types
-// -------------------------------------------------------------------
-
-type Protocol = "ssh" | "winrm" | "tcp" | "telnet";
-type TunnelType = "local" | "remote" | "dynamic";
-
-interface SessionInfo {
-  name: string;
-  protocol: Protocol;
-  target: string;
-  connectedAt: Date;
-  commandCount: number;
-  lastCommandAt: Date | null;
-  platform: "windows" | "linux" | "macos" | "network-device" | "unknown";
-  shellFamily: "posix" | "powershell" | "cmd" | "unknown";
-}
-
-
-interface RemoteSession {
-  info: SessionInfo;
-  process: ChildProcess;
-  buffer: string;
-  ready: boolean;
-  commandQueue: Array<{
-    id: string;
-    command: string;
-    marker?: string;
-    resolve: (output: string) => void;
-    reject: (err: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>;
-  execChain: Promise<unknown>;
-  telnetState?: {
-    mode: "data" | "iac" | "iac-command" | "sb" | "sb-iac";
-    command?: number;
-  };
-  tainted?: {
-    reason: string;
-    at: Date;
-    command: string;
-  };
-}
-
-interface TunnelInfo {
-  id: string;
-  type: TunnelType;
-  via: string;
-  localPort: number;
-  remoteHost: string;
-  remotePort: number;
-  process: ChildProcess;
-  createdAt: Date;
-  description: string;
-}
-
-interface RelayInfo {
-  id: string;
-  session: string;
-  method: RelayMethod;
-  listenPort: number;
-  targetHost: string;
-  targetPort: number;
-  listenAddress?: string;
-  createdAt: Date;
-  description: string;
-}
-
-// -------------------------------------------------------------------
-// Marker for command boundary detection
-// -------------------------------------------------------------------
-const MARKER_PREFIX = "__PI_CMD_DONE_";
-const MARKER_SUFFIX = "__";
-
-function generateMarker(): string {
-  return `${MARKER_PREFIX}${Date.now()}_${Math.random().toString(36).slice(2, 8)}${MARKER_SUFFIX}`;
-}
-
-function generateId(prefix = "cmd"): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-// -------------------------------------------------------------------
-// Session Manager State
+// State & helpers
 // -------------------------------------------------------------------
 
 const sessions = new Map<string, RemoteSession>();
@@ -163,42 +90,10 @@ let relayCounter = 0;
 let defaultSessionName: string | null = null;
 
 const LOG_DIR = join(process.cwd(), "logs", "remote-sessions");
-const COMMAND_TIMEOUT_MS = 60_000;
 
-
-function killTrackedProcess(proc: ChildProcess): void {
-  try {
-    if (proc.pid) process.kill(-proc.pid, "SIGTERM");
-  } catch {
-    try { proc.kill("SIGTERM"); } catch { /* ignore */ }
-  }
-}
-
-function processTelnetChunk(session: RemoteSession, data: Buffer): string {
-  const result = processTelnetBytes(session.telnetState, data);
-  for (const reply of result.replies) {
-    session.process.stdin?.write(Buffer.from(reply));
-  }
-  session.telnetState = result.state;
-  return result.text;
-}
-
-function getLocalHostname(): string {
-  return process.env.HOSTNAME || process.env.COMPUTERNAME || "unknown-host";
-}
-
-function getLogPath(sessionName: string): string {
-  try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* ignore */ }
-  const ts = new Date().toISOString().slice(0, 10);
-  return join(LOG_DIR, `${sessionName}-${ts}.log`);
-}
-
-function logToSession(sessionName: string, direction: ">>>" | "<<<" | "---", content: string): void {
-  const logPath = getLogPath(sessionName);
-  const ts = new Date().toISOString();
-  const host = getLocalHostname();
-  const line = `[${ts}] host=${host} ${direction} ${content}\n`;
-  try { appendFileSync(logPath, line); } catch { /* ignore */ }
+// Bound log helper — avoids repeating LOG_DIR on every call
+function log(sessionName: string, direction: ">>>" | "<<<" | "---", content: string): void {
+  _logToSession(LOG_DIR, sessionName, direction, content);
 }
 
 function getSession(name?: string): RemoteSession {
@@ -206,388 +101,12 @@ function getSession(name?: string): RemoteSession {
   return sessions.get(selectedName)!;
 }
 
-// -------------------------------------------------------------------
-// SSH Connection
-// -------------------------------------------------------------------
-
-
-function connectSSH(name: string, target: string, options: { port?: number; identity?: string; proxyJump?: string; password?: string; platformHint?: SessionInfo["platform"]; shellHint?: ShellFamily } = {}): Promise<RemoteSession> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-tt",
-      "-o", "StrictHostKeyChecking=accept-new",
-      "-o", "ServerAliveInterval=30",
-      "-o", "ServerAliveCountMax=3",
-      "-o", "LogLevel=ERROR",
-      "-o", "PreferredAuthentications=publickey,password,keyboard-interactive",
-    ];
-    if (options.port) args.push("-p", String(options.port));
-    if (options.identity) args.push("-i", options.identity);
-    if (options.proxyJump) args.push("-J", options.proxyJump);
-    args.push(target);
-
-    const sshpassPath = existsSync("/usr/bin/sshpass") ? "/usr/bin/sshpass" : (existsSync("/bin/sshpass") ? "/bin/sshpass" : null);
-    if (options.password && !sshpassPath) {
-      reject(new Error("SSH password authentication requested, but sshpass is not installed in the container. Install sshpass or use key-based auth / remote_connect(password=...)."));
-      return;
-    }
-
-    const proc = options.password
-      ? spawn(sshpassPath!, ["-e", "ssh", ...args], {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, TERM: "dumb", SSHPASS: options.password },
-        })
-      : spawn("ssh", args, {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, TERM: "dumb" },
-        });
-
-    const session: RemoteSession = {
-      info: {
-        name,
-        protocol: "ssh",
-        target,
-        connectedAt: new Date(),
-        commandCount: 0,
-        lastCommandAt: null,
-        platform: options.platformHint || "unknown",
-        shellFamily: options.shellHint || (options.platformHint === "linux" || options.platformHint === "macos" ? "posix" : "unknown"),
-      },
-      process: proc,
-      buffer: "",
-      ready: false,
-      commandQueue: [],
-      execChain: Promise.resolve(),
-    };
-
-    let connectTimeout = setTimeout(() => {
-      proc.kill();
-      reject(new Error(`SSH connection to ${target} timed out (30s)`));
-    }, 30_000);
-
-    proc.stdout!.on("data", (data: Buffer) => {
-      const text = data.toString();
-      session.buffer += text;
-
-      if (!session.ready) {
-        const detected = detectSshShell(session.buffer, options.platformHint, options.shellHint);
-        if (detected) {
-          session.info.platform = detected.platform;
-          session.info.shellFamily = detected.shellFamily;
-          session.ready = true;
-          clearTimeout(connectTimeout);
-          resolve(session);
-          return;
-        }
-      }
-
-      // Check command queue for marker completion
-      const item = session.commandQueue[0];
-      if (item?.marker) {
-        const markerStart = session.buffer.indexOf(item.marker);
-        if (markerStart !== -1) {
-          const output = session.buffer.slice(0, markerStart).trim();
-          session.buffer = session.buffer.slice(markerStart + item.marker.length);
-          session.commandQueue.shift();
-          clearTimeout(item.timeout);
-          item.resolve(output);
-        }
-      }
-    });
-
-    proc.stderr!.on("data", (data: Buffer) => {
-      const text = data.toString();
-      if (text.includes("Permission denied") || text.includes("Connection refused") ||
-          text.includes("No route to host") || text.includes("Connection timed out")) {
-        clearTimeout(connectTimeout);
-        proc.kill();
-        reject(new Error(`SSH connection failed: ${text.trim()}`));
-      }
-    });
-
-    proc.on("close", (code) => {
-      clearTimeout(connectTimeout);
-      if (!session.ready) {
-        reject(new Error(`SSH process exited with code ${code} before session was ready`));
-      }
-      for (const item of session.commandQueue) {
-        clearTimeout(item.timeout);
-        item.reject(new Error("Session closed"));
-      }
-      session.commandQueue = [];
-      sessions.delete(name);
-      if (defaultSessionName === name) defaultSessionName = null;
-    });
-
-    proc.on("error", (err) => {
-      clearTimeout(connectTimeout);
-      reject(new Error(`Failed to spawn SSH: ${err.message}`));
-    });
-  });
-}
-
-// -------------------------------------------------------------------
-// WinRM Connection (via PowerShell)
-// -------------------------------------------------------------------
-
-function connectWinRM(name: string, target: string, options: { user?: string; password?: string; port?: number } = {}): Promise<RemoteSession> {
-  return new Promise((resolve, reject) => {
-    const parsed = parseWinRmTarget(target, options.user);
-    const safeTarget = psSingleQuote(parsed.computerName);
-    const portArg = options.port ? ` -Port ${options.port}` : "";
-    const psCommand = options.password
-      ? `$pw = ConvertTo-SecureString '${psSingleQuote(options.password)}' -AsPlainText -Force; $cred = New-Object PSCredential('${psSingleQuote(parsed.user || "")}', $pw); Enter-PSSession -ComputerName '${safeTarget}'${portArg} -Credential $cred`
-      : `Enter-PSSession -ComputerName '${safeTarget}'${portArg}`;
-
-    const proc = spawn("pwsh", ["-NoProfile", "-NoLogo", "-Command", "-"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, TERM: "dumb" },
-    });
-
-    const session: RemoteSession = {
-      info: {
-        name,
-        protocol: "winrm",
-        target,
-        connectedAt: new Date(),
-        commandCount: 0,
-        lastCommandAt: null,
-        platform: "windows",
-        shellFamily: "powershell",
-      },
-      process: proc,
-      buffer: "",
-      ready: false,
-      commandQueue: [],
-      execChain: Promise.resolve(),
-    };
-
-    proc.stdin!.write(psCommand + "\n");
-
-    let connectTimeout = setTimeout(() => {
-      proc.kill();
-      reject(new Error(`WinRM connection to ${target} timed out (30s)`));
-    }, 30_000);
-
-    proc.stdout!.on("data", (data: Buffer) => {
-      session.buffer += data.toString();
-
-      if (!session.ready && session.buffer.includes("PS ")) {
-        session.ready = true;
-        clearTimeout(connectTimeout);
-        session.buffer = "";
-        resolve(session);
-      }
-
-      const item = session.commandQueue[0];
-      if (item?.marker) {
-        const markerStart = session.buffer.indexOf(item.marker);
-        if (markerStart !== -1) {
-          const output = session.buffer.slice(0, markerStart).trim();
-          session.buffer = session.buffer.slice(markerStart + item.marker.length);
-          session.commandQueue.shift();
-          clearTimeout(item.timeout);
-          item.resolve(output);
-        }
-      }
-    });
-
-    proc.stderr!.on("data", (data: Buffer) => {
-      const text = data.toString();
-      if (text.includes("Access is denied") || text.includes("WinRM cannot")) {
-        clearTimeout(connectTimeout);
-        proc.kill();
-        reject(new Error(`WinRM connection failed: ${text.trim()}`));
-      }
-    });
-
-    proc.on("close", () => {
-      clearTimeout(connectTimeout);
-      for (const item of session.commandQueue) {
-        clearTimeout(item.timeout);
-        item.reject(new Error("Session closed"));
-      }
-      sessions.delete(name);
-      if (defaultSessionName === name) defaultSessionName = null;
-    });
-
-    proc.on("error", (err) => {
-      clearTimeout(connectTimeout);
-      reject(new Error(`Failed to spawn pwsh for WinRM: ${err.message}`));
-    });
-  });
-}
-
-// -------------------------------------------------------------------
-// TCP / Telnet Connection (network devices / legacy services)
-// -------------------------------------------------------------------
-
-function connectTCP(name: string, host: string, port: number): Promise<RemoteSession> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("nc", [host, String(port)], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const session: RemoteSession = {
-      info: {
-        name,
-        protocol: "tcp",
-        target: `${host}:${port}`,
-        connectedAt: new Date(),
-        commandCount: 0,
-        lastCommandAt: null,
-        platform: "unknown",
-        shellFamily: "unknown",
-      },
-      process: proc,
-      buffer: "",
-      ready: false,
-      commandQueue: [],
-      execChain: Promise.resolve(),
-    };
-
-    let settled = false;
-    let stderr = "";
-    const connectTimeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { proc.kill(); } catch { /* ignore */ }
-      reject(new Error(`TCP connection to ${host}:${port} timed out (15s)`));
-    }, 15_000);
-    const readyFallback = setTimeout(() => {
-      if (settled || proc.killed || proc.exitCode !== null) return;
-      settled = true;
-      session.ready = true;
-      clearTimeout(connectTimeout);
-      resolve(session);
-    }, 1500);
-
-    const clearConnectTimers = () => {
-      clearTimeout(connectTimeout);
-      clearTimeout(readyFallback);
-    };
-
-    proc.stdout!.on("data", (data: Buffer) => {
-      session.buffer += data.toString();
-      if (!session.ready && !settled) {
-        settled = true;
-        session.ready = true;
-        clearConnectTimers();
-        if (session.buffer.match(/[#>]\s*$/)) {
-          session.info.platform = "network-device";
-          session.info.shellFamily = "unknown";
-        }
-        resolve(session);
-      }
-    });
-
-    proc.stderr!.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      clearConnectTimers();
-      sessions.delete(name);
-      if (defaultSessionName === name) defaultSessionName = null;
-      if (!settled) {
-        settled = true;
-        reject(new Error(`TCP connection to ${host}:${port} closed before it became ready${stderr.trim() ? `: ${stderr.trim()}` : ` (exit=${code ?? "unknown"})`}`));
-      }
-    });
-
-    proc.on("error", (err) => {
-      clearConnectTimers();
-      if (!settled) {
-        settled = true;
-        reject(new Error(`TCP connection failed: ${err.message}`));
-      }
-    });
-  });
-}
-
-function connectTelnet(name: string, host: string, port: number): Promise<RemoteSession> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("nc", [host, String(port)], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const session: RemoteSession = {
-      info: {
-        name,
-        protocol: "telnet",
-        target: `${host}:${port}`,
-        connectedAt: new Date(),
-        commandCount: 0,
-        lastCommandAt: null,
-        platform: "unknown",
-        shellFamily: "unknown",
-      },
-      process: proc,
-      buffer: "",
-      ready: false,
-      commandQueue: [],
-      execChain: Promise.resolve(),
-      telnetState: { mode: "data" },
-    };
-
-    let settled = false;
-    let stderr = "";
-    const connectTimeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { proc.kill(); } catch { /* ignore */ }
-      reject(new Error(`Telnet connection to ${host}:${port} timed out (15s)`));
-    }, 15_000);
-    const readyFallback = setTimeout(() => {
-      if (settled || proc.killed || proc.exitCode !== null) return;
-      settled = true;
-      session.ready = true;
-      clearTimeout(connectTimeout);
-      resolve(session);
-    }, 1500);
-
-    const clearConnectTimers = () => {
-      clearTimeout(connectTimeout);
-      clearTimeout(readyFallback);
-    };
-
-    proc.stdout!.on("data", (data: Buffer) => {
-      const text = processTelnetChunk(session, data);
-      session.buffer += text;
-      if (!session.ready && text.length > 0 && !settled) {
-        settled = true;
-        session.ready = true;
-        clearConnectTimers();
-        if (session.buffer.match(/[#>:]\s*$/)) {
-          session.info.platform = "network-device";
-          session.info.shellFamily = "unknown";
-        }
-        resolve(session);
-      }
-    });
-
-    proc.stderr!.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      clearConnectTimers();
-      sessions.delete(name);
-      if (defaultSessionName === name) defaultSessionName = null;
-      if (!settled) {
-        settled = true;
-        reject(new Error(`Telnet connection to ${host}:${port} closed before it became ready${stderr.trim() ? `: ${stderr.trim()}` : ` (exit=${code ?? "unknown"})`}`));
-      }
-    });
-
-    proc.on("error", (err) => {
-      clearConnectTimers();
-      if (!settled) {
-        settled = true;
-        reject(new Error(`Telnet connection failed: ${err.message}`));
-      }
-    });
-  });
+// Shared session-cleanup callback — passed to every protocol adapter
+function makeCleanup() {
+  return (name: string) => {
+    sessions.delete(name);
+    if (defaultSessionName === name) defaultSessionName = null;
+  };
 }
 
 // -------------------------------------------------------------------
@@ -610,7 +129,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
 
     session.info.commandCount++;
     session.info.lastCommandAt = new Date();
-    logToSession(session.info.name, ">>>", command);
+    log(session.info.name, ">>>", command);
 
     if (session.info.protocol === "tcp" || session.info.protocol === "telnet") {
       // TCP/telnet modes are best-effort only: output is collected by timeout/prompt heuristics.
@@ -620,7 +139,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       const collectTimeout = setTimeout(() => {
         const output = session.buffer.trim();
         session.buffer = "";
-        logToSession(session.info.name, "<<<", output);
+        log(session.info.name, "<<<", output);
         resolve(output);
       }, Math.min(timeoutMs, 5000));
 
@@ -630,7 +149,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
           clearInterval(checkInterval);
           const output = session.buffer.trim();
           session.buffer = "";
-          logToSession(session.info.name, "<<<", output);
+          log(session.info.name, "<<<", output);
           resolve(output);
         }
       }, 200);
@@ -650,7 +169,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       session.buffer = "";
       const reason = `previous command timed out after ${timeoutMs / 1000}s and may still be running`;
       session.tainted = { reason, at: new Date(), command };
-      logToSession(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s; SESSION TAINTED] ${partial}`);
+      log(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s; SESSION TAINTED] ${partial}`);
       resolve(`[Command timed out after ${timeoutMs / 1000}s]\nSession marked tainted because the remote command may still be running. Disconnect and reconnect before issuing more commands.\n${partial}`);
     }, timeoutMs);
 
@@ -660,7 +179,7 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       marker,
       resolve: (output) => {
         const cleaned = cleanCommandOutput(session, command, output);
-        logToSession(session.info.name, "<<<", cleaned);
+        log(session.info.name, "<<<", cleaned);
         resolve(cleaned);
       },
       reject,
@@ -705,6 +224,8 @@ export default function (pi: ExtensionAPI) {
       proxy_jump: Type.Optional(Type.String({ description: "SSH ProxyJump host for multi-hop (e.g., 'user@jumpbox' or 'user@hop1,user@hop2')" })),
       user: Type.Optional(Type.String({ description: "Username for WinRM" })),
       password: Type.Optional(Type.String({ description: "Password for SSH or WinRM. For SSH, remote_connect uses sshpass when available." })),
+      use_ssl: Type.Optional(Type.Boolean({ description: "WinRM: connect over HTTPS (port 5986). Use when the target has HTTP disabled or only accepts HTTPS WinRM." })),
+      skip_cert_check: Type.Optional(Type.Boolean({ description: "WinRM HTTPS: skip CA and CN certificate validation. Use for self-signed certificates. Adds -SkipCACheck -SkipCNCheck to the PSSessionOption." })),
       platform_hint: Type.Optional(Type.String({ description: "Override/assist platform detection when the remote shell is known or auto-detection is unreliable (e.g., linux, windows, macos, network-device)" })),
       shell_hint: Type.Optional(Type.String({ description: "Override shell framing when known (posix, powershell, cmd). Useful when auto-detection is unreliable." })),
       set_default: Type.Optional(Type.Boolean({ description: "Set this as the default session for remote_exec (default: true if first session)" })),
@@ -726,7 +247,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      logToSession(params.name, "---", `[SESSION START] ${params.protocol}://${params.target}`);
+      log(params.name, "---", `[SESSION START] ${params.protocol}://${params.target}`);
 
       try {
         let session: RemoteSession;
@@ -740,6 +261,7 @@ export default function (pi: ExtensionAPI) {
               password: params.password,
               platformHint: params.platform_hint as SessionInfo["platform"] | undefined,
               shellHint: params.shell_hint as ShellFamily | undefined,
+              onCleanup: makeCleanup(),
             });
             break;
           case "winrm":
@@ -747,18 +269,21 @@ export default function (pi: ExtensionAPI) {
               user: params.user,
               password: params.password,
               port: params.port,
+              useSsl: params.use_ssl === true,
+              skipCertCheck: params.skip_cert_check === true,
+              onCleanup: makeCleanup(),
             });
             break;
           case "tcp": {
             const parsed = parseHostPortTarget(params.target, params.port ?? 23);
             const port = params.port ?? parsed.port;
-            session = await connectTCP(params.name, parsed.host, port);
+            session = await connectTCP(params.name, parsed.host, port, { onCleanup: makeCleanup() });
             break;
           }
           case "telnet": {
             const parsed = parseHostPortTarget(params.target, params.port ?? 23);
             const port = params.port ?? parsed.port;
-            session = await connectTelnet(params.name, parsed.host, port);
+            session = await connectTelnet(params.name, parsed.host, port, { onCleanup: makeCleanup() });
             break;
           }
         }
@@ -782,7 +307,7 @@ export default function (pi: ExtensionAPI) {
             ? "\nMode: Telnet best-effort with basic option negotiation"
             : "";
         return {
-          content: [{ type: "text", text: `Connected: session '${params.name}' → ${params.target} via ${params.protocol.toUpperCase()}\nPlatform: ${session!.info.platform}${proxyInfo}${modeNote}\nActive sessions: ${sessions.size}\nLog: ${getLogPath(params.name)}` }],
+          content: [{ type: "text", text: `Connected: session '${params.name}' → ${params.target} via ${params.protocol.toUpperCase()}\nPlatform: ${session!.info.platform}${proxyInfo}${modeNote}\nActive sessions: ${sessions.size}\nLog: ${_getLogPath(LOG_DIR, params.name)}` }],
           details: { session: session!.info, totalSessions: sessions.size },
         };
       } catch (err: any) {
@@ -890,7 +415,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      logToSession(session.info.name, ">>>", `[UPLOAD] ${params.remote_path} (${params.content.length} bytes)`);
+      log(session.info.name, ">>>", `[UPLOAD] ${params.remote_path} (${params.content.length} bytes)`);
       const output = await execCommand(session, writeCmd);
 
       return {
@@ -1006,7 +531,7 @@ export default function (pi: ExtensionAPI) {
           const available = [...sessions.keys()].join(", ");
           throw new Error(`Session '${params.session}' not found. Available: ${available}`);
         }
-        logToSession(params.session, "---", "[SESSION END]");
+        log(params.session, "---", "[SESSION END]");
         try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
         await new Promise(resolve => setTimeout(resolve, 500));
         killTrackedProcess(session.process);
@@ -1018,7 +543,7 @@ export default function (pi: ExtensionAPI) {
       } else {
         // Disconnect all
         for (const [name, session] of sessions) {
-          logToSession(name, "---", "[SESSION END — disconnect all]");
+          log(name, "---", "[SESSION END — disconnect all]");
           try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
           killTrackedProcess(session.process);
         }
@@ -1099,73 +624,42 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const { forwardSpec, sshArgs: args } = buildTunnelSshArgs({
-        type: params.type,
-        via: params.via,
-        localPort: params.local_port,
-        remoteHost: params.remote_host,
-        remotePort: params.remote_port,
-        sshPort: params.ssh_port,
-        identity: params.identity,
-        proxyJump: params.proxy_jump,
-      });
-
-      const sshpassPath = existsSync("/usr/bin/sshpass") ? "/usr/bin/sshpass" : (existsSync("/bin/sshpass") ? "/bin/sshpass" : null);
-      if (params.password && !sshpassPath) {
-        throw new Error("SSH password authentication requested for remote_tunnel, but sshpass is not installed in the container. Install sshpass or use key-based auth.");
-      }
-
-      const proc = params.password
-        ? spawn(sshpassPath!, ["-e", "ssh", ...args], {
-            stdio: ["ignore", "pipe", "pipe"],
-            env: { ...process.env, SSHPASS: params.password },
-          })
-        : spawn("ssh", args, {
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-
-      const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-        let settled = false;
-        let stderr = "";
-        const fatalPattern = /(permission denied|connection refused|no route to host|connection timed out|could not resolve hostname|network is unreachable|administratively prohibited|address already in use|bad local forwarding specification|bad remote forwarding specification|channel_setup_fwd_listener: cannot listen)/i;
-
-        const finish = (value: { success: boolean; error?: string }) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(successTimer);
-          resolve(value);
-        };
-
-        proc.stderr!.on("data", (data: Buffer) => {
-          stderr += data.toString();
-          if (fatalPattern.test(stderr)) {
-            finish({ success: false, error: stderr.trim() });
-          }
-        });
-
-        proc.on("close", (code) => {
-          if (settled) return;
-          finish({ success: false, error: stderr.trim() || `SSH exited with code ${code}` });
-        });
-
-        proc.on("error", (err) => finish({ success: false, error: err.message }));
-
-        const successTimer = setTimeout(() => {
-          if (!proc.killed && proc.exitCode === null) {
-            finish({ success: true });
-          } else {
-            finish({ success: false, error: stderr.trim() || `SSH exited with code ${proc.exitCode}` });
-          }
-        }, 5000);
-      });
-
-      if (!result.success) {
-        throw new Error(`Tunnel creation failed: ${result.error}`);
-      }
-
       tunnelCounter++;
       const tunnelId = `tun-${tunnelCounter}`;
       const description = buildTunnelDescription(params.type, params.via, params.local_port, params.remote_host, params.remote_port, params.description);
+
+      const proc = await spawnSSHTunnel(
+        {
+          type:       params.type,
+          via:        params.via,
+          localPort:  params.local_port,
+          remoteHost: params.remote_host,
+          remotePort: params.remote_port,
+          sshPort:    params.ssh_port,
+          identity:   params.identity,
+          password:   params.password,
+          proxyJump:  params.proxy_jump,
+        },
+        tunnelId,
+        (id, code) => {
+          const idx = activeTunnels.findIndex(t => t.id === id);
+          if (idx !== -1) {
+            activeTunnels.splice(idx, 1);
+            log("_tunnels", "---", `[TUNNEL CLOSED] ${id} exit=${code ?? "unknown"}`);
+            if (ctx.hasUI) {
+              activeTunnels.length === 0
+                ? ctx.ui.setStatus("tunnels", undefined)
+                : ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
+            }
+          }
+        },
+      );
+
+      const { forwardSpec } = buildTunnelSshArgs({
+        type: params.type, via: params.via, localPort: params.local_port,
+        remoteHost: params.remote_host, remotePort: params.remote_port,
+        sshPort: params.ssh_port, identity: params.identity, proxyJump: params.proxy_jump,
+      });
 
       const tunnel: TunnelInfo = {
         id: tunnelId,
@@ -1180,22 +674,7 @@ export default function (pi: ExtensionAPI) {
       };
 
       activeTunnels.push(tunnel);
-      logToSession("_tunnels", "---", `[TUNNEL CREATED] ${tunnelId}: -${forwardSpec!} ${params.via}`);
-
-      proc.on("close", (code) => {
-        const idx = activeTunnels.findIndex(t => t.id === tunnelId);
-        if (idx !== -1) {
-          activeTunnels.splice(idx, 1);
-          logToSession("_tunnels", "---", `[TUNNEL CLOSED] ${tunnelId} exit=${code ?? "unknown"}`);
-          if (ctx.hasUI) {
-            if (activeTunnels.length === 0) {
-              ctx.ui.setStatus("tunnels", undefined);
-            } else {
-              ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
-            }
-          }
-        }
-      });
+      log("_tunnels", "---", `[TUNNEL CREATED] ${tunnelId}: -${forwardSpec ?? params.local_port} ${params.via}`);
 
       if (ctx.hasUI) {
         ctx.ui.setStatus("tunnels", ctx.ui.theme.fg("accent", `🔀 ${activeTunnels.length} tunnel(s)`));
@@ -1233,23 +712,17 @@ export default function (pi: ExtensionAPI) {
       let closed = 0;
 
       if (params.id) {
-        const idx = activeTunnels.findIndex(t => t.id === params.id);
-        if (idx === -1) {
+        const tunnel = activeTunnels.find(t => t.id === params.id);
+        if (!tunnel) {
           const available = activeTunnels.map(t => t.id).join(", ");
           throw new Error(`Tunnel '${params.id}' not found. Available: ${available}`);
         }
-        const tunnel = activeTunnels[idx];
-        killTrackedProcess(tunnel.process);
-        activeTunnels.splice(idx, 1);
-        logToSession("_tunnels", "---", `[TUNNEL CLOSED] ${tunnel.id}`);
+        log("_tunnels", "---", `[TUNNEL CLOSED] ${tunnel.id}`);
+        closeTunnel(activeTunnels, params.id);
         closed = 1;
       } else {
-        for (const tunnel of activeTunnels) {
-          killTrackedProcess(tunnel.process);
-          logToSession("_tunnels", "---", `[TUNNEL CLOSED] ${tunnel.id}`);
-        }
-        closed = activeTunnels.length;
-        activeTunnels.length = 0;
+        for (const tunnel of activeTunnels) log("_tunnels", "---", `[TUNNEL CLOSED] ${tunnel.id}`);
+        closed = closeAllTunnels(activeTunnels);
       }
 
       if (ctx.hasUI) {
@@ -1300,92 +773,44 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`Session '${session.info.name}' has been disconnected.`);
       }
 
-      let method: RelayMethod;
-
-      if (!params.method || params.method === "auto") {
-        // Probe for available tools
-        const probeCmd = buildRelayProbeCommand(session.info.platform);
-        const probeOutput = await execCommand(session, probeCmd, 10_000);
-        const available = detectRelayMethods(probeOutput, session.info.platform);
-
-        if (available.length === 0) {
-          throw new Error(`No relay tools detected on '${session.info.name}' (${session.info.platform}). Probe output:\n${probeOutput}\n\nTry specifying method manually or use remote_tunnel through an SSH-capable pivot.`);
-        }
-        method = available[0];
-      } else {
-        method = params.method as RelayMethod;
-      }
-
-      const spec: RelaySpec = {
-        method,
-        listenPort: params.listen_port,
-        targetHost: params.target_host,
-        targetPort: params.target_port,
-        listenAddress: params.listen_address,
-      };
-      validateRelaySpec(spec);
-
-      // Confirm with operator
+      // Operator confirmation
       if (ctx.hasUI) {
         const confirmed = await ctx.ui.confirm(
           "Create Relay",
-          `Set up ${method} relay on '${session.info.name}':\n${session.info.target}:${params.listen_port} → ${params.target_host}:${params.target_port}`,
+          `Set up relay on '${session.info.name}':\n${session.info.target}:${params.listen_port} → ${params.target_host}:${params.target_port}`,
         );
-        if (!confirmed) {
-          throw new Error("Relay creation cancelled by operator");
-        }
-      }
-
-      // Execute the relay command
-      const relayCmd = buildRelayCommand(spec);
-      logToSession(session.info.name, ">>>", `[RELAY SETUP] ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}`);
-      const output = await execCommand(session, relayCmd, 10_000);
-
-      // Verify it's listening
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const verifyCmd = buildRelayVerifyCommand(spec);
-      const verifyOutput = await execCommand(session, verifyCmd, 10_000);
-
-      const listening = relayVerifyOutputConfirmsListening(spec, verifyOutput);
-
-      if (!listening) {
-        let cleanupNote = "cleanup not run";
-        try {
-          const cleanupOutput = await execCommand(session, buildRelayCleanupCommand(spec), 10_000);
-          cleanupNote = cleanupOutput.trim() || "cleanup command sent";
-        } catch (err: any) {
-          cleanupNote = `cleanup failed: ${err.message}`;
-        }
-        logToSession(session.info.name, "---", `[RELAY SETUP FAILED] ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}; ${cleanupNote}`);
-        throw new Error(`Relay setup was not verified as listening on port ${params.listen_port}; cleanup attempted.\nVerify output:\n${verifyOutput}\nCleanup: ${cleanupNote}${output ? `\nRelay command output:\n${output}` : ""}`);
+        if (!confirmed) throw new Error("Relay creation cancelled by operator");
       }
 
       relayCounter++;
       const relayId = `relay-${relayCounter}`;
-      const description = params.description || `${method} relay on ${session.info.name}: :${params.listen_port} → ${params.target_host}:${params.target_port}`;
 
-      activeRelays.push({
-        id: relayId,
-        session: session.info.name,
-        method,
-        listenPort: params.listen_port,
-        targetHost: params.target_host,
-        targetPort: params.target_port,
-        listenAddress: params.listen_address,
-        createdAt: new Date(),
-        description,
-      });
+      const relayInfo = await setupRelay(
+        {
+          session,
+          targetHost:    params.target_host,
+          targetPort:    params.target_port,
+          listenPort:    params.listen_port,
+          listenAddress: params.listen_address,
+          method:        params.method as RelayMethod | "auto" | undefined,
+          description:   params.description,
+          relayId,
+        },
+        (s, cmd, timeout) => execCommand(s, cmd, timeout),
+        (name, dir, content) => log(name, dir, content),
+      );
 
-      logToSession(session.info.name, "---", `[RELAY CREATED] ${relayId}: ${method} :${params.listen_port} → ${params.target_host}:${params.target_port}`);
+      activeRelays.push(relayInfo);
 
       const pivotTarget = session.info.target.includes("@") ? session.info.target.split("@")[1] : session.info.target;
-      const pivotHost = pivotTarget.split(":")[0];
+      const pivotHost   = pivotTarget.split(":")[0];
+      const { method }  = relayInfo;
 
       const usageLines = [
         `Relay created: ${relayId}`,
         `Method: ${method}`,
         `Path: ${session.info.name} (${pivotHost}):${params.listen_port} → ${params.target_host}:${params.target_port}`,
-        `Verified listening: ${listening ? "yes" : "UNCONFIRMED — check manually"}`,
+        `Verified listening: yes`,
         "",
         "Usage from harness:",
       ];
@@ -1403,15 +828,7 @@ export default function (pi: ExtensionAPI) {
       } else {
         usageLines.push(`  Connect to ${pivotHost}:${params.listen_port} to reach ${params.target_host}:${params.target_port}`);
       }
-
-      usageLines.push("");
-      usageLines.push(`Cleanup: remote_relay_close(id="${relayId}")`);
-
-      if (!listening) {
-        usageLines.push("");
-        usageLines.push(`⚠ Verify output:\n${verifyOutput}`);
-        if (output) usageLines.push(`Relay command output:\n${output}`);
-      }
+      usageLines.push("", `Cleanup: remote_relay_close(id="${relayId}")`);
 
       return {
         content: [{ type: "text", text: usageLines.join("\n") }],
@@ -1440,9 +857,6 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      let closed = 0;
-      const results: string[] = [];
-
       const toClose = params.id
         ? activeRelays.filter(r => r.id === params.id)
         : [...activeRelays];
@@ -1452,34 +866,19 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`Relay '${params.id}' not found. Available: ${available}`);
       }
 
+      const results: string[] = [];
       for (const relay of toClose) {
-        const session = sessions.get(relay.session);
-        const spec: RelaySpec = {
-          method: relay.method,
-          listenPort: relay.listenPort,
-          targetHost: relay.targetHost,
-          targetPort: relay.targetPort,
-          listenAddress: relay.listenAddress,
-        };
-
-        if (session && !session.process.killed) {
-          const cleanupCmd = buildRelayCleanupCommand(spec);
-          try {
-            const output = await execCommand(session, cleanupCmd, 10_000);
-            results.push(`${relay.id}: closed (${output.trim()})`);
-          } catch {
-            results.push(`${relay.id}: cleanup command failed (session may be dead)`);
-          }
-        } else {
-          results.push(`${relay.id}: session '${relay.session}' unavailable — relay may still be running on host`);
-        }
-
-        logToSession(relay.session, "---", `[RELAY CLOSED] ${relay.id}`);
-        const idx = activeRelays.findIndex(r => r.id === relay.id);
-        if (idx !== -1) activeRelays.splice(idx, 1);
-        closed++;
+        const msg = await teardownRelay(
+          relay,
+          activeRelays,
+          (name) => sessions.get(name),
+          (s, cmd, timeout) => execCommand(s, cmd, timeout),
+          (name, dir, content) => log(name, dir, content),
+        );
+        results.push(msg);
       }
 
+      const closed = results.length;
       return {
         content: [{ type: "text", text: `Closed ${closed} relay(s). ${activeRelays.length} remaining.\n${results.join("\n")}` }],
         details: { closed, remaining: activeRelays.length },
@@ -1490,6 +889,37 @@ export default function (pi: ExtensionAPI) {
   // -------------------------------------------------------------------
   // Slash Commands
   // -------------------------------------------------------------------
+
+  // Intel snapshot helper for /pursue and /scope
+  function readIntelSnapshot(): { pursue: PursueIntelSnapshot | null; raw: { hosts: Record<string, any>; credentials: Record<string, any>; accounts: Record<string, any>; pivots: Record<string, any>; timeline: any[] } | null } {
+    try {
+      const intelDir = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
+      if (!existsSync(intelDir)) return { pursue: null, raw: null };
+      const read = (file: string): any => {
+        const p = join(intelDir, file);
+        if (!existsSync(p)) return {};
+        try { return parseYaml(readFileSync(p, "utf8")) ?? {}; } catch { return {}; }
+      };
+      const hosts       = read("hosts.yaml").hosts       ?? {};
+      const credentials = read("credentials.yaml").credentials ?? {};
+      const accounts    = read("accounts.yaml").accounts    ?? {};
+      const pivots      = read("pivots.yaml").paths         ?? {};
+      const timeline    = read("timeline.yaml").timeline    ?? [];
+      const inactiveStatuses = new Set(["rotated", "expired", "revoked", "disabled", "inactive", "invalid"]);
+      const unvalidatedCreds = Object.entries(credentials)
+        .filter(([_, c]: [string, any]) => !inactiveStatuses.has(c.status ?? ""))
+        .filter(([_, c]: [string, any]) => !c.valid_on || (c.valid_on as string[]).length === 0)
+        .map(([id, c]: [string, any]) => ({ id, type: c.type || "unknown", username: c.username || "", keyFile: c.key_file }));
+      const activeCreds = Object.entries(credentials)
+        .filter(([_, c]: [string, any]) => c.status === "active")
+        .map(([id, c]: [string, any]) => ({ id, type: c.type || "unknown", username: c.username || "", keyFile: c.key_file }));
+      const knownHostIps = Object.values(hosts).map((h: any) => h.ip).filter(Boolean) as string[];
+      const knownHostIds = Object.keys(hosts);
+      return { pursue: { unvalidatedCreds, activeCreds, knownHostIps, knownHostIds }, raw: { hosts, credentials, accounts, pivots, timeline } };
+    } catch {
+      return { pursue: null, raw: null };
+    }
+  }
 
   function operatorSessions(): OperatorSessionSummary[] {
     return [...sessions.values()].map(session => ({
@@ -1547,10 +977,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("pursue", {
-    description: "Operator shortcut: credential/pivot chase board commands",
+    description: "Operator shortcut: credential/pivot chase board with pre-built validation commands",
     handler: async (args, ctx) => {
       const parsed = parseShortcutArgs(args);
-      showOrStage(ctx, parsed.prompt, buildPursuePrompt(), formatPursueShortcut(operatorSessions()));
+      const { pursue: intelSnap } = readIntelSnapshot();
+      const display = formatPursueShortcut(operatorSessions(), intelSnap);
+      showOrStage(ctx, parsed.prompt, buildPursuePrompt(), display);
     },
   });
 
@@ -1587,8 +1019,84 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("scope", {
+    description: "Situational dump: active sessions, tunnels, intel counts, and last 5 timeline entries",
+    handler: async (_args, ctx) => {
+      const lines: string[] = ["=== SCOPE ===", ""];
+
+      // Active sessions
+      if (sessions.size === 0) {
+        lines.push("Sessions: none");
+      } else {
+        lines.push(`Sessions (${sessions.size}):`);
+        for (const [name, s] of sessions) {
+          const isDefault = name === defaultSessionName ? " *" : "";
+          const taint = s.tainted ? " [TAINTED]" : "";
+          lines.push(`  ${s.process.killed ? "✗" : "✓"} ${name}${isDefault} → ${s.info.protocol}://${s.info.target} (${s.info.platform}, ${s.info.commandCount} cmds)${taint}`);
+        }
+      }
+
+      // Tunnels & relays
+      if (activeTunnels.length > 0) {
+        lines.push("");
+        lines.push(`Tunnels (${activeTunnels.length}):`);
+        for (const t of activeTunnels) {
+          const alive = !t.process.killed && t.process.exitCode === null;
+          lines.push(`  ${alive ? "✓" : "✗"} [${t.id}] ${t.type} :${t.localPort} via ${t.via}`);
+        }
+      }
+      if (activeRelays.length > 0) {
+        lines.push("");
+        lines.push(`Relays (${activeRelays.length}):`);
+        for (const r of activeRelays) {
+          lines.push(`  [${r.id}] ${r.method} ${r.session}:${r.listenPort} → ${r.targetHost}:${r.targetPort}`);
+        }
+      }
+
+      // Intel store snapshot
+      const { raw } = readIntelSnapshot();
+      lines.push("");
+      if (!raw) {
+        lines.push("Intel: not initialized");
+      } else {
+        const hCount  = Object.keys(raw.hosts).length;
+        const cCount  = Object.keys(raw.credentials).length;
+        const aCount  = Object.keys(raw.accounts).length;
+        const pCount  = Object.keys(raw.pivots).length;
+        const tCount  = Array.isArray(raw.timeline) ? raw.timeline.length : 0;
+        const dirty   = Object.values(raw.hosts).filter((h: any) => h.status === "compromised").length;
+        const activeCreds = Object.values(raw.credentials).filter((c: any) => c.status === "active").length;
+        const unvalidated = Object.values(raw.credentials).filter((c: any) => !(["rotated","expired","revoked","disabled","inactive","invalid"].includes(c.status ?? "")) && (!c.valid_on || (c.valid_on as string[]).length === 0)).length;
+        lines.push(`Intel: ${hCount} hosts (${dirty} compromised) | ${cCount} creds (${activeCreds} active, ${unvalidated} unvalidated) | ${aCount} accounts | ${pCount} pivots | ${tCount} events`);
+        // Last 5 timeline entries
+        if (Array.isArray(raw.timeline) && raw.timeline.length > 0) {
+          lines.push("");
+          lines.push("Last 5 events:");
+          raw.timeline.slice(-5).reverse().forEach((e: any) => {
+            lines.push(`  ${(e.timestamp || "").slice(0, 19).replace("T", " ")}  ${e.summary || ""}`);
+          });
+        }
+      }
+
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("map", {
+    description: "Attack graph: host nodes, credential blast radius, accounts, pivot chains",
+    handler: async (_args, ctx) => {
+      const { raw } = readIntelSnapshot();
+      if (!raw) {
+        ctx.ui.notify("Intel store not initialized. Run intel_add to record findings first.", "info");
+        return;
+      }
+      const activeSessionNames = new Set([...sessions.keys()]);
+      const map = buildIntelMap(raw.hosts, raw.credentials, raw.accounts, raw.pivots, { activeSessions: activeSessionNames });
+      ctx.ui.notify(map, "info");
+    },
+  });
+
   pi.registerCommand("remote-connect", {
-    description: "Preview connection arguments; use the remote_connect tool for the actual connection",
     handler: async (args, ctx) => {
       if (!args) {
         ctx.ui.notify("Usage: /remote-connect <ssh|winrm|tcp|telnet> <target> --name <name> (preview only; use remote_connect tool to connect)", "info");
@@ -1608,7 +1116,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       if (args === "--all") {
         for (const [name, session] of sessions) {
-          logToSession(name, "---", "[SESSION END via /command]");
+          log(name, "---", "[SESSION END via /command]");
           try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
           killTrackedProcess(session.process);
         }
@@ -1629,7 +1137,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Session '${name}' not found`, "error");
         return;
       }
-      logToSession(name, "---", "[SESSION END via /command]");
+      log(name, "---", "[SESSION END via /command]");
       try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
       killTrackedProcess(session.process);
       sessions.delete(name);
@@ -1691,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     // Gracefully close all sessions
     for (const [name, session] of sessions) {
-      logToSession(name, "---", "[SESSION END — pi shutdown]");
+      log(name, "---", "[SESSION END — pi shutdown]");
       try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
       killTrackedProcess(session.process);
     }
@@ -1700,7 +1208,7 @@ export default function (pi: ExtensionAPI) {
 
     // Close all tunnels
     for (const tunnel of activeTunnels) {
-      logToSession("_tunnels", "---", `[TUNNEL CLOSED — pi shutdown] ${tunnel.id}`);
+      log("_tunnels", "---", `[TUNNEL CLOSED — pi shutdown] ${tunnel.id}`);
       killTrackedProcess(tunnel.process);
     }
     activeTunnels.length = 0;
@@ -1708,7 +1216,7 @@ export default function (pi: ExtensionAPI) {
     // Note: relays are processes on remote hosts — they persist after harness shutdown.
     // Log them so the operator knows cleanup is needed.
     for (const relay of activeRelays) {
-      logToSession(relay.session, "---", `[RELAY ORPHANED — pi shutdown] ${relay.id}: ${relay.method} :${relay.listenPort} → ${relay.targetHost}:${relay.targetPort}`);
+      log(relay.session, "---", `[RELAY ORPHANED — pi shutdown] ${relay.id}: ${relay.method} :${relay.listenPort} → ${relay.targetHost}:${relay.targetPort}`);
     }
     activeRelays.length = 0;
   });

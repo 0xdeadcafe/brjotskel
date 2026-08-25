@@ -8,6 +8,13 @@ export interface OperatorSessionSummary {
   commandCount?: number;
 }
 
+export interface PursueIntelSnapshot {
+  unvalidatedCreds: Array<{ id: string; type: string; username: string; keyFile?: string }>;
+  activeCreds: Array<{ id: string; type: string; username: string; keyFile?: string }>;
+  knownHostIps: string[];
+  knownHostIds: string[];
+}
+
 export interface ShortcutArgs {
   sessionName?: string;
   prompt: boolean;
@@ -37,7 +44,7 @@ function sessionHeader(phase: string, session?: OperatorSessionSummary, sessions
   return `=== ${phase.toUpperCase()} ===\n${activeSessionLine(sessions)}`;
 }
 
-function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: string; persistence: string; credentials: string; ir: string; verify: string[] } {
+function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: string; persistence: string; credentials: string; ir: string; verify: string[]; collectEvidence: string; containKill: string; containBlock: string; containDisable: string; eradScripts: string[] } {
   switch (platform) {
     case "windows":
       return {
@@ -51,6 +58,16 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
           ".pi/skills/host-ir-playbooks/windows/persistence-hunt.ps1",
           ".pi/skills/host-ir-playbooks/windows/eventlog-hunt-lite.ps1",
         ],
+        collectEvidence: ".pi/skills/gather-playbooks/windows/collect-evidence.ps1",
+        containKill: ".pi/skills/containment-playbooks/windows/kill-process.ps1",
+        containBlock: ".pi/skills/containment-playbooks/windows/block-c2.ps1",
+        containDisable: ".pi/skills/containment-playbooks/windows/disable-account.ps1",
+        eradScripts: [
+          ".pi/skills/eradication-playbooks/windows/remove-scheduled-task.ps1",
+          ".pi/skills/eradication-playbooks/windows/remove-service.ps1",
+          ".pi/skills/eradication-playbooks/windows/remove-registry-run.ps1",
+          ".pi/skills/eradication-playbooks/windows/remove-wmi-subscription.ps1",
+        ],
       };
     case "macos":
       return {
@@ -58,11 +75,18 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
         network: ".pi/skills/gather-playbooks/macos/enum-network.sh",
         persistence: ".pi/skills/gather-playbooks/macos/enum-persistence.sh",
         credentials: ".pi/skills/gather-playbooks/macos/enum-credentials.sh",
-        ir: ".pi/skills/host-ir-playbooks/macos/live-response.sh",
+        ir: ".pi/skills/host-ir-playbooks/macos/initial-assessment.sh",
         verify: [
           ".pi/skills/gather-playbooks/macos/first-look.sh",
           ".pi/skills/gather-playbooks/macos/enum-persistence.sh",
-          ".pi/skills/host-ir-playbooks/macos/live-response.sh",
+          ".pi/skills/host-ir-playbooks/macos/initial-assessment.sh",
+        ],
+        collectEvidence: ".pi/skills/gather-playbooks/macos/collect-evidence.sh",
+        containKill: ".pi/skills/containment-playbooks/macos/kill-process.sh",
+        containBlock: ".pi/skills/containment-playbooks/macos/block-c2.sh",
+        containDisable: ".pi/skills/containment-playbooks/macos/disable-account.sh",
+        eradScripts: [
+          ".pi/skills/eradication-playbooks/macos/remove-launch-item.sh",
         ],
       };
     case "linux":
@@ -78,6 +102,16 @@ function scriptPaths(platform: OperatorPlatform): { firstLook: string; network: 
           ".pi/skills/gather-playbooks/linux/enum-persistence.sh",
           ".pi/skills/gather-playbooks/linux/enum-network.sh",
         ],
+        collectEvidence: ".pi/skills/gather-playbooks/linux/collect-evidence.sh",
+        containKill: ".pi/skills/containment-playbooks/linux/kill-process.sh",
+        containBlock: ".pi/skills/containment-playbooks/linux/block-c2.sh",
+        containDisable: ".pi/skills/containment-playbooks/linux/disable-account.sh",
+        eradScripts: [
+          ".pi/skills/eradication-playbooks/linux/remove-cron.sh",
+          ".pi/skills/eradication-playbooks/linux/remove-systemd-unit.sh",
+          ".pi/skills/eradication-playbooks/linux/remove-ssh-key.sh",
+          ".pi/skills/eradication-playbooks/linux/remove-profile-hook.sh",
+        ],
       };
   }
 }
@@ -92,11 +126,13 @@ export function buildAssessPrompt(session: OperatorSessionSummary): string {
 }
 
 export function buildContainPrompt(session: OperatorSessionSummary): string {
-  return `Prepare evidence-first containment options for remote session "${session.name}". First capture process/network/session state, then propose the minimal commands to stop a malicious process, block a C2 IP, disable a task/service/user, or isolate networking. Do not execute disruptive commands without explicit confirmation.`;
+  const p = scriptPaths(session.platform);
+  return `Prepare evidence-first containment for remote session "${session.name}". Step 1: read and run ${p.collectEvidence} to capture volatile state — save output to workspace/evidence/${session.name}/. Step 2: based on findings, run targeted containment using the appropriate script: kill-process (${p.containKill}), block-c2 (${p.containBlock}), disable-account (${p.containDisable}), or isolate (linux: .pi/skills/containment-playbooks/linux/isolate-host.sh). Read each script first — they are parameterised. Step 3: verify each action. Do not execute disruptive commands without explicit operator confirmation.`;
 }
 
 export function buildEradicatePrompt(session: OperatorSessionSummary): string {
-  return `Prepare eradication steps for remote session "${session.name}". Identify persistence evidence first, propose removal/disable commands with rollback notes, and verify removal. Do not execute destructive changes without explicit confirmation.`;
+  const p = scriptPaths(session.platform);
+  return `Prepare evidence-backed eradication for remote session "${session.name}". For each confirmed persistence mechanism, use the appropriate eradication script: ${p.eradScripts.join(", ")}. Read each script — they are parameterised and require explicit values. Each script: captures evidence, removes the artifact, and verifies removal. Do not execute without confirming the target artifact matches attacker persistence. After removal, re-run ${p.verify[0]} and ${p.verify[1]} to confirm clean state.`;
 }
 
 export function buildVerifyPrompt(session: OperatorSessionSummary): string {
@@ -105,7 +141,7 @@ export function buildVerifyPrompt(session: OperatorSessionSummary): string {
 }
 
 export function buildPursuePrompt(): string {
-  return "Use intel_summary plus intel_query(all_hosts/all_credentials/all_pivots) to build a concise pursuit board: credentials not validated, suspected hosts not assessed, active pivot paths, and the next 3 highest-value moves. Do not generate a report.";
+  return "Call intel_map() to render the attack graph, then intel_query(query_type='all_credentials') to list all credentials. For each active or unvalidated credential call intel_get_cred to retrieve the secret and generate the correct netexec validation command against all known host IPs. Update valid_on with intel_update for every confirmed hit. Do not generate a report — produce the chase board and execute it.";
 }
 
 export function formatLandShortcut(sessions: OperatorSessionSummary[]): string {
@@ -150,63 +186,112 @@ export function formatAssessShortcut(session: OperatorSessionSummary | undefined
   ].join("\n");
 }
 
-export function formatPursueShortcut(sessions: OperatorSessionSummary[]): string {
-  return [
-    sessionHeader("pursue", undefined, sessions),
-    "Chase board commands:",
-    "1. Current map:",
-    "   intel_summary()",
-    "   intel_query(query_type=\"all_hosts\")",
-    "   intel_query(query_type=\"all_credentials\")",
-    "   intel_query(query_type=\"all_pivots\")",
-    "2. Pull material for an access path:",
-    "   intel_get_cred(id=\"<credential-id>\")",
-    "   intel_query(query_type=\"for_host\", target=\"<host-id>\")",
-    "3. Validate/pivot manually from the harness:",
-    "   netexec smb <target/range> -u <user> -H <hash>",
-    "   remote_tunnel(...) / remote_relay(...) / remote_connect(...) ",
-    "4. Record only new truths:",
-    "   credential valid_on, new host, pivot path, compromised account, containment/eradication timeline event",
-  ].join("\n");
+export function formatPursueShortcut(sessions: OperatorSessionSummary[], intel?: PursueIntelSnapshot | null): string {
+  const header = sessionHeader("pursue", undefined, sessions);
+  const lines: string[] = [header, ""];
+
+  // Live chase board from intel store
+  if (intel && (intel.unvalidatedCreds.length > 0 || intel.activeCreds.length > 0)) {
+    const hostList = intel.knownHostIps.length > 0 ? intel.knownHostIps.join(",") : "<host-ip>";
+
+    if (intel.unvalidatedCreds.length > 0) {
+      lines.push(`UNVALIDATED CREDENTIALS (${intel.unvalidatedCreds.length}) — validate against known hosts:`);
+      for (const c of intel.unvalidatedCreds) {
+        const cmd = credValidationCmd(c.type, c.username, c.id, hostList, c.keyFile);
+        lines.push(`  [${c.type}] ${c.id} / ${c.username}`);
+        lines.push(`    intel_get_cred(id="${c.id}")`);
+        lines.push(`    ${cmd}`);
+        lines.push(`    intel_update(category="credential", id="${c.id}", fields="valid_on:\\n  - <host-id>", summary="${c.id} confirmed on <host>"`);
+      }
+      lines.push("");
+    }
+
+    if (intel.knownHostIps.length > 0) {
+      lines.push(`Known hosts: ${intel.knownHostIds.join("  ")}`);
+      lines.push(`Known IPs:   ${intel.knownHostIps.join("  ")}`);
+      lines.push("");
+    }
+  } else if (intel) {
+    lines.push("No unvalidated credentials. Run gather credential playbooks to recover material.");
+    lines.push("");
+  }
+
+  // Static fallback / manual commands
+  lines.push("Manual commands:");
+  lines.push("  intel_map()  — attack graph");
+  lines.push("  intel_query(query_type=\"all_credentials\")  — all creds");
+  lines.push("  intel_get_cred(id=\"<id>\")  — retrieve secret");
+  lines.push("  netexec smb/ssh/winrm <range> -u <user> -H <hash>  — validate");
+  lines.push("  remote_tunnel / remote_relay / remote_connect  — pivot");
+  lines.push("  intel_update(valid_on / new host / pivot path / account)");
+
+  return lines.join("\n");
+}
+
+function credValidationCmd(type: string, username: string, id: string, hostList: string, keyFile?: string): string {
+  switch (type) {
+    case "ntlm-hash":
+      return `netexec smb ${hostList} -u ${username} -H <hash from intel_get_cred> --no-bruteforce`;
+    case "password":
+      return `netexec smb ${hostList} -u ${username} -p '<password from intel_get_cred>' --no-bruteforce`;
+    case "ssh-key":
+    case "private-key":{
+      const kf = keyFile ? `<key_file from intel_get_cred>` : `<key_file from intel_get_cred>`;
+      return `netexec ssh ${hostList} -u ${username} --key-file ${kf}`;
+    }
+    case "kerberos-tgt":
+    case "kerberos-tgs":
+      return `netexec smb ${hostList} -u ${username} --use-kcache  # set KRB5CCNAME first`;
+    case "token":
+    case "api-key":
+      return `# token type — validate manually based on service`;
+    default:
+      return `netexec smb ${hostList} -u ${username} -p '<secret from intel_get_cred>'`;
+  }
 }
 
 export function formatContainShortcut(session: OperatorSessionSummary | undefined, sessions: OperatorSessionSummary[]): string {
   if (!session) return `${sessionHeader("contain", undefined, sessions)}\nUsage: /contain <session> [--prompt]`;
-  const windows = session.platform === "windows";
+  const p = scriptPaths(session.platform);
   return [
     sessionHeader("contain", session),
-    "Evidence-first containment pack (do not auto-run blindly):",
-    windows
-      ? "1. Snapshot: Get-Process | Sort CPU -Desc | Select -First 30; Get-NetTCPConnection -State Established,Listen"
-      : "1. Snapshot: ps auxfww --sort=-%cpu | head -40; ss -tunap || netstat -tunap",
-    windows
-      ? "2. Kill process: Stop-Process -Id <pid> -Force; verify with Get-Process -Id <pid>"
-      : "2. Kill process: kill -TERM <pid>; sleep 2; kill -0 <pid> || echo stopped",
-    windows
-      ? "3. Block C2: New-NetFirewallRule -DisplayName 'IR Block C2 <ip>' -Direction Outbound -RemoteAddress <ip> -Action Block"
-      : "3. Block C2: iptables -I OUTPUT -d <ip> -j DROP  # or nft equivalent",
-    windows
-      ? "4. Disable persistence temporarily: Disable-ScheduledTask / Stop-Service + Set-Service -StartupType Disabled"
-      : "4. Disable persistence temporarily: systemctl stop/disable <unit>, comment cron, or move authorized_keys after copying evidence",
-    "5. Record action: intel_timeline(action=\"add\", entry_type=\"containment\", entry_action=\"contained\", ...)",
+    "⚠️  EVIDENCE FIRST — run collect-evidence before any action:",
+    `   Read ${p.collectEvidence}`,
+    `   ${runPlaybookPrompt(session.name, p.collectEvidence)}`,
+    "   Save output → workspace/evidence/" + session.name + "/volatile-<ts>.txt",
+    "",
+    "Containment scripts (read, set params, run inline):",
+    `   Kill process:    ${p.containKill}  (TARGET_PID=<pid>)`,
+    `   Block C2:        ${p.containBlock}  (C2_IP=<ip>)`,
+    `   Disable account: ${p.containDisable}  (TARGET_USER=<user>)`,
+    ...(session.platform === "linux"
+      ? ["   Isolate host:    .pi/skills/containment-playbooks/linux/isolate-host.sh  (ANALYST_IP=<your-ip>)"]
+      : []),
+    "",
+    "After action — record:",
+    "   intel_update(category=\"host\", id=\"<host>\", fields=\"status: contained\\nnotes: ...\", summary=\"...\")",
   ].join("\n");
 }
 
 export function formatEradicateShortcut(session: OperatorSessionSummary | undefined, sessions: OperatorSessionSummary[]): string {
   if (!session) return `${sessionHeader("eradicate", undefined, sessions)}\nUsage: /eradicate <session> [--prompt]`;
-  const windows = session.platform === "windows";
+  const p = scriptPaths(session.platform);
   return [
     sessionHeader("eradicate", session),
-    "Evidence-backed removal pack:",
-    windows
-      ? "1. Reconfirm persistence: scheduled tasks, services, Run keys, WMI subscriptions, startup folders"
-      : "1. Reconfirm persistence: cron, systemd units/timers, shell profiles, SSH keys, rc.local, launchd on macOS",
-    "2. Preserve minimal evidence: path, owner, timestamps, hashes, config/value contents",
-    windows
-      ? "3. Remove/disable: Unregister-ScheduledTask, sc.exe delete, Remove-ItemProperty, Remove-CimInstance for WMI bindings"
-      : "3. Remove/disable: rm/quarantine artifact, systemctl disable/mask, crontab edit, remove rogue authorized_keys entry",
-    "4. Verify persistence did not recreate; watch for reconnect/listener/process return",
-    "5. Record action: intel_timeline(action=\"add\", entry_type=\"eradication\", entry_action=\"eradicated\", ...)",
+    "Evidence-backed eradication scripts (read, set params, run inline):",
+    ...p.eradScripts.map(s => `   ${s}`),
+    "",
+    "Pattern for each: EVIDENCE → REMOVE → VERIFY → RECORD",
+    "Each script: exports artifact evidence, removes, verifies removal, emits intel_timeline snippet.",
+    "",
+    "After each removal — re-run persistence check:",
+    `   ${p.verify[1]}`,
+    "",
+    "After all removals — re-run first-look:",
+    `   ${p.verify[0]}`,
+    "",
+    "Mark clean:",
+    "   intel_update(category=\"host\", id=\"<host>\", fields=\"status: eradicated\\nnotes: ...\", summary=\"...\")",
   ].join("\n");
 }
 

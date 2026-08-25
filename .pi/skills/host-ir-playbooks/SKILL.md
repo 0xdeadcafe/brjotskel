@@ -77,6 +77,7 @@ This skill currently ships as a **starter set**: a few focused host-IR playbooks
 | `windows/eventlog-hunt.ps1` | Windows | Host-centric Windows event investigation for logons, PowerShell, service/task creation, WMI, RDP, Defender, log clearing, and Sysmon |
 | `windows/powershell-reconstruction.ps1` | Windows | Reconstruct PowerShell activity from 4103/4104/4105/4106, classic PowerShell logs, history, and execution-policy artifacts |
 | `windows/sysmon-hunt.ps1` | Windows | Sysmon-focused hunt for execution, network, registry/file changes, injection/process access, DNS, WMI, pipes, and tampering |
+| `macos/initial-assessment.sh` | macOS | Attacker-perspective compromise investigation: non-Apple persistence, suspicious processes, pivot artifacts, credential exposure clues, security state |
 | `macos/live-response.sh` | macOS | Live-response triage, launchd persistence, recent execution clues, and security state |
 
 ## Playbook categories

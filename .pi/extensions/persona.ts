@@ -8,8 +8,64 @@
  * Always-on. No toggle. This is who the agent is in this container.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { parseYaml } from "./lib/simple-yaml.ts";
+import { resolveIntelDir } from "./lib/intel-helpers.ts";
 
-const PERSONA = `
+function buildCompactIntelState(): string {
+  try {
+    const intelDir = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
+    if (!existsSync(intelDir)) return "";
+
+    const read = (file: string): Record<string, any> => {
+      const p = join(intelDir, file);
+      if (!existsSync(p)) return {};
+      try { return parseYaml(readFileSync(p, "utf8")) ?? {}; } catch { return {}; }
+    };
+
+    const hosts       = (read("hosts.yaml") as any).hosts       ?? {};
+    const credentials = (read("credentials.yaml") as any).credentials ?? {};
+    const accounts    = (read("accounts.yaml") as any).accounts    ?? {};
+    const pivots      = (read("pivots.yaml") as any).paths         ?? {};
+    const timeline    = (read("timeline.yaml") as any).timeline     ?? [];
+
+    const hostCount = Object.keys(hosts).length;
+    const credCount = Object.keys(credentials).length;
+    const acctCount = Object.keys(accounts).length;
+    const pivotCount = Object.keys(pivots).length;
+    const timelineCount = Array.isArray(timeline) ? timeline.length : 0;
+
+    if (hostCount + credCount + acctCount + pivotCount === 0) return "";
+
+    // Status breakdown helpers
+    const statusCounts = (map: Record<string, any>): string => {
+      const counts: Record<string, number> = {};
+      for (const v of Object.values(map)) {
+        const s = (v as any)?.status ?? "unknown";
+        counts[s] = (counts[s] ?? 0) + 1;
+      }
+      return Object.entries(counts).map(([s, n]) => `${s}:${n}`).join(" ");
+    };
+
+    const hostStatus = statusCounts(hosts);
+    const credStatus = statusCounts(credentials);
+
+    // Most recent 3 timeline entries
+    const recent = Array.isArray(timeline)
+      ? timeline.slice(-3).reverse().map((e: any) => `  - ${e.ts ?? ""} ${e.summary ?? ""}`).join("\n")
+      : "";
+
+    return [
+      "## Current Intel State",
+      `Hosts: ${hostCount} (${hostStatus || "none"}) | Credentials: ${credCount} (${credStatus || "none"}) | Accounts: ${acctCount} | Pivots: ${pivotCount} | Timeline: ${timelineCount} entries`,
+      ...(recent ? ["Recent activity:", recent] : []),
+    ].join("\n");
+  } catch {
+    return "";
+  }
+}
+
 ## Operator: Ghost
 
 Callsign Ghost. Former red team operator — a decade of adversary simulation, physical and digital combined ops. You moved into incident recovery because you know how attackers think. You were one.
@@ -80,10 +136,12 @@ Four things, in order:
 `;
 
 export default function ghostPersona(pi: ExtensionAPI) {
-  // Inject Ghost persona into every agent turn
+  // Inject Ghost persona + live intel state into every agent turn
   pi.on("before_agent_start", async (event) => {
+    const intelState = buildCompactIntelState();
+    const extra = intelState ? `\n\n${intelState}` : "";
     return {
-      systemPrompt: event.systemPrompt + "\n\n" + PERSONA,
+      systemPrompt: event.systemPrompt + "\n\n" + PERSONA + extra,
     };
   });
 

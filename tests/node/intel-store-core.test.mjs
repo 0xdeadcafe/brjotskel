@@ -15,6 +15,8 @@ import {
   searchIntel,
   formatSearchResult,
   buildIntelSummary,
+  buildIntelMap,
+  filterTimeline,
 } from '../../.pi/extensions/lib/intel-store-core.ts';
 import { hosts, credentials, accounts, pivots, timeline } from '../fixtures/intel/sample-intel.mjs';
 
@@ -116,4 +118,56 @@ test('buildIntelSummary reports counts and evidence metrics', () => {
   assert.match(output, /with evidence: 1/);
   assert.match(output, /Timeline entries: 1/);
   assert.match(output, /Intel dir: \/tmp\/intel/);
+});
+
+test('buildIntelMap renders host nodes, credential edges, accounts, and pivots', () => {
+  const map = buildIntelMap(hosts, credentials, accounts, pivots);
+  assert.match(map, /Attack Graph/);
+  assert.match(map, /web01/);
+  assert.match(map, /compromised/);
+  assert.match(map, /CREDENTIALS/);
+  assert.match(map, /deploy-ssh-key/);
+  assert.match(map, /deploy/);
+  assert.match(map, /web01/);   // valid_on
+  assert.match(map, /ACCOUNTS/);
+  assert.match(map, /sqlsvc/);
+  assert.match(map, /PIVOT PATHS/);
+  assert.match(map, /to-web01/);
+});
+
+test('buildIntelMap annotates active sessions on host nodes', () => {
+  const map = buildIntelMap(hosts, credentials, accounts, pivots, { activeSessions: new Set(['web01']) });
+  assert.match(map, /SESSION ACTIVE/);
+  assert.match(map, /ACTIVE SESSIONS: web01/);
+});
+
+test('filterTimeline filters by host target', () => {
+  const entries = [
+    { timestamp: '2026-08-01T00:00:00Z', type: 'host', action: 'discovered', target: 'web01', summary: 'found web01', operator: 'x' },
+    { timestamp: '2026-08-02T00:00:00Z', type: 'credential', action: 'discovered', target: 'admin-ntlm', summary: 'hash found', operator: 'x' },
+  ];
+  const result = filterTimeline(entries, { host: 'web01' });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].target, 'web01');
+});
+
+test('filterTimeline filters by category and action', () => {
+  const entries = [
+    { timestamp: '2026-08-01T00:00:00Z', type: 'host',       action: 'discovered', target: 'web01',      summary: '', operator: 'x' },
+    { timestamp: '2026-08-02T00:00:00Z', type: 'credential', action: 'confirmed',   target: 'admin-ntlm', summary: '', operator: 'x' },
+    { timestamp: '2026-08-03T00:00:00Z', type: 'host',       action: 'contained',   target: 'web01',      summary: '', operator: 'x' },
+  ];
+  assert.equal(filterTimeline(entries, { category: 'host' }).length, 2);
+  assert.equal(filterTimeline(entries, { action: 'contained' }).length, 1);
+  assert.equal(filterTimeline(entries, { category: 'credential', action: 'confirmed' }).length, 1);
+});
+
+test('filterTimeline filters by since datetime', () => {
+  const entries = [
+    { timestamp: '2026-08-01T00:00:00Z', type: 'host', action: 'discovered', target: 'web01', summary: '', operator: 'x' },
+    { timestamp: '2026-08-10T00:00:00Z', type: 'host', action: 'contained',  target: 'web01', summary: '', operator: 'x' },
+  ];
+  const result = filterTimeline(entries, { since: '2026-08-05T00:00:00Z' });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].action, 'contained');
 });

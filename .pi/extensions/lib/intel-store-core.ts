@@ -246,3 +246,127 @@ export function buildIntelSummary(hosts: Record<string, any>, credentials: Recor
 
   return lines.join("\n");
 }
+
+// -------------------------------------------------------------------
+// buildIntelMap — text-format attack graph
+// -------------------------------------------------------------------
+export function buildIntelMap(
+  hosts: Record<string, any>,
+  credentials: Record<string, any>,
+  accounts: Record<string, any>,
+  pivots: Record<string, any>,
+  options?: { activeSessions?: Set<string> }
+): string {
+  const activeSessions = options?.activeSessions ?? new Set<string>();
+  const pad = (s: string, n: number) => s.length >= n ? s : s + " ".repeat(n - s.length);
+  const lines: string[] = ["=== Attack Graph ===", ""];
+
+  // HOSTS
+  const hostEntries = Object.entries(hosts) as [string, any][];
+  lines.push(`HOSTS (${hostEntries.length})`);
+  if (hostEntries.length === 0) {
+    lines.push("  (none recorded)");
+  } else {
+    for (const [id, h] of hostEntries) {
+      const ip       = h.ip || h.hostname || "—";
+      const platform = h.platform || "—";
+      const status   = h.status || "unknown";
+      const session  = activeSessions.has(id) ? "  ← SESSION ACTIVE" : "";
+      lines.push(`  ${pad(id, 16)}  ${pad(status, 14)}  ${pad(platform, 10)}  ${ip}${session}`);
+    }
+  }
+
+  // CREDENTIALS → BLAST RADIUS
+  lines.push("");
+  const credEntries = Object.entries(credentials) as [string, any][];
+  lines.push(`CREDENTIALS → VALID ON (${credEntries.length})`);
+  if (credEntries.length === 0) {
+    lines.push("  (none recorded)");
+  } else {
+    const inactiveStatuses = new Set(["rotated", "expired", "revoked", "disabled", "inactive", "invalid"]);
+    for (const [id, c] of credEntries) {
+      const type     = c.type || "?";
+      const user     = c.username || "?";
+      const status   = c.status || "unknown";
+      const validOn  = (c.valid_on as string[] | undefined) ?? [];
+      const inactive = inactiveStatuses.has(status);
+      const target   = inactive ? `(${status})`
+                     : validOn.length > 0 ? validOn.join(", ")
+                     : "(unvalidated)";
+      lines.push(`  ${pad(id, 20)}  ${pad(type, 14)}  ${pad(user, 16)}  ${pad(status, 12)}  → ${target}`);
+    }
+  }
+
+  // ACCOUNTS
+  lines.push("");
+  const acctEntries = Object.entries(accounts) as [string, any][];
+  lines.push(`ACCOUNTS (${acctEntries.length})`);
+  if (acctEntries.length === 0) {
+    lines.push("  (none recorded)");
+  } else {
+    for (const [id, a] of acctEntries) {
+      const type    = a.type || "?";
+      const status  = a.status || "unknown";
+      const domain  = a.domain ? `${a.domain}\\` : "";
+      const user    = `${domain}${a.username || id}`;
+      const accTo   = ((a.access_to as string[] | undefined) ?? []).join(", ") || "—";
+      lines.push(`  ${pad(user, 26)}  ${pad(type, 14)}  ${pad(status, 12)}  → ${accTo}`);
+    }
+  }
+
+  // PIVOT PATHS
+  lines.push("");
+  const pivotEntries = Object.entries(pivots) as [string, any][];
+  lines.push(`PIVOT PATHS (${pivotEntries.length})`);
+  if (pivotEntries.length === 0) {
+    lines.push("  (none recorded)");
+  } else {
+    for (const [id, p] of pivotEntries) {
+      const status = p.status || "?";
+      const target = p.target || "?";
+      const chain  = (p.chain as any[] | undefined ?? []).map((h: any) => `${h.hop}→${h.method || "?"}`).join(" ");
+      lines.push(`  ${pad(id, 18)}  ${pad(status, 12)}  ${chain}  target:${target}`);
+    }
+  }
+
+  // ACTIVE SESSIONS
+  if (activeSessions.size > 0) {
+    lines.push("");
+    lines.push(`ACTIVE SESSIONS: ${[...activeSessions].join(", ")}`);
+  }
+
+  return lines.join("\n");
+}
+
+// -------------------------------------------------------------------
+// filterTimeline — apply optional filter predicates to timeline entries
+// -------------------------------------------------------------------
+export function filterTimeline(
+  entries: any[],
+  opts: { host?: string; category?: string; action?: string; since?: string }
+): any[] {
+  let result = entries;
+  if (opts.host) {
+    const h = opts.host.toLowerCase();
+    result = result.filter((e: any) =>
+      String(e.target || "").toLowerCase().includes(h) ||
+      String(e.summary || "").toLowerCase().includes(h)
+    );
+  }
+  if (opts.category) {
+    result = result.filter((e: any) => (e.type || "") === opts.category);
+  }
+  if (opts.action) {
+    result = result.filter((e: any) => (e.action || "") === opts.action);
+  }
+  if (opts.since) {
+    const since = new Date(opts.since).getTime();
+    if (!isNaN(since)) {
+      result = result.filter((e: any) => {
+        const ts = new Date(e.timestamp || 0).getTime();
+        return !isNaN(ts) && ts >= since;
+      });
+    }
+  }
+  return result;
+}

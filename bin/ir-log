@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # ir-log — Append an audit entry tagged with local execution context.
+# Supports two output formats:
+#   text (default)  — human-readable %q-quoted fields
+#   jsonl           — NDJSON; set BRJOTSKEL_LOG_FORMAT=jsonl
+#
+# Usage: ir-log <event description>
+# Environment:
+#   BRJOTSKEL_LOG_DIR     — log directory (default: logs)
+#   BRJOTSKEL_LOG_FORMAT  — "jsonl" for NDJSON output, anything else for text
+#   BRJOTSKEL_AUTH_CONTEXT — optional auth context label
 set -euo pipefail
 
 log_dir="${BRJOTSKEL_LOG_DIR:-logs}"
@@ -8,9 +17,30 @@ log_file="$log_dir/audit-$(date -u +%Y%m%d).log"
 host_name="$(hostname 2>/dev/null || uname -n 2>/dev/null || printf 'unknown-host')"
 operator_name="${USER:-$(id -un 2>/dev/null || printf 'unknown-user')}"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+auth_ctx="${BRJOTSKEL_AUTH_CONTEXT:-}"
+event="$*"
 
-if [[ -n "${BRJOTSKEL_AUTH_CONTEXT:-}" ]]; then
-  printf '%s auth=%q operator=%q host=%q event=%q\n' "$ts" "$BRJOTSKEL_AUTH_CONTEXT" "$operator_name" "$host_name" "$*" >> "$log_file"
+if [[ "${BRJOTSKEL_LOG_FORMAT:-}" == "jsonl" ]]; then
+  # NDJSON output — fields: ts, operator, host, auth (omitted if empty), event
+  # Use python3 for reliable JSON escaping without external deps
+  python3 -c "
+import json, sys
+fields = {
+    'ts':       sys.argv[1],
+    'operator': sys.argv[2],
+    'host':     sys.argv[3],
+    'event':    sys.argv[4],
+}
+auth = sys.argv[5]
+if auth:
+    fields['auth'] = auth
+print(json.dumps(fields, ensure_ascii=False))
+" "$ts" "$operator_name" "$host_name" "$event" "$auth_ctx" >> "$log_file"
 else
-  printf '%s operator=%q host=%q event=%q\n' "$ts" "$operator_name" "$host_name" "$*" >> "$log_file"
+  # Default text format — %q-quoted for shell-safe grep and manual review
+  if [[ -n "$auth_ctx" ]]; then
+    printf '%s auth=%q operator=%q host=%q event=%q\n' "$ts" "$auth_ctx" "$operator_name" "$host_name" "$event" >> "$log_file"
+  else
+    printf '%s operator=%q host=%q event=%q\n' "$ts" "$operator_name" "$host_name" "$event" >> "$log_file"
+  fi
 fi

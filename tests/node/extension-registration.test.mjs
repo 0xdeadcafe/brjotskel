@@ -76,6 +76,7 @@ test('extension entrypoints import and register tools with a mocked pi API', asy
   assert.deepEqual(intelPi.tools.map(t => t.name).sort(), [
     'intel_add',
     'intel_get_cred',
+    'intel_map',
     'intel_query',
     'intel_summary',
     'intel_timeline',
