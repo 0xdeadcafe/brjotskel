@@ -1,7 +1,7 @@
 ---
 name: gather-playbooks
 zero_key: false
-description: "Post-exploitation gather playbooks for compromised host triage. Native OS commands only — no binaries uploaded. Covers credential harvesting, system enumeration, network mapping, persistence detection, and security tool identification across Linux, Windows, and macOS."
+description: "Post-exploitation gather playbooks for compromised host triage. Native OS commands only — no third-party binaries on targets. Covers credential harvesting, system enumeration, network mapping, persistence detection, and security tool identification across Linux, Windows, and macOS."
 ---
 
 # Gather Playbooks — Post-Exploitation Host Triage
@@ -15,9 +15,9 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 
 ## ⚠️ Core Principles
 
-1. **Native commands only** — Every script uses native OS commands or commonly available built-in administrative tooling already present on the target. No curl downloads, no pip installs, no binary uploads.
+1. **Native commands only** — Every script uses native OS commands or commonly available built-in administrative tooling already present on the target. No curl downloads, no pip installs, no third-party binary uploads.
 2. **Read-only** — Gather scripts do not modify the system. Exception: `hashdump` on Windows saves registry hives (documented clearly).
-3. **Execution cleanup** — When scripts are uploaded for execution, remove them afterward as part of the workflow.
+3. **Execution cleanup** — Prefer inline execution. When script text is staged with `remote_upload`, remove it afterward as part of the workflow.
 4. **Minimal footprint** — Scripts should stay small and fast, and produce structured text output.
 5. **No persistent state** — Scripts don't write temp files, logs, or markers on target.
 
@@ -37,7 +37,7 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 
 ## Playbook Inventory
 
-### Linux
+### Linux — 19 scripts
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
@@ -45,10 +45,13 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 | `linux/hashdump.sh` | credentials | /etc/shadow, /etc/passwd, opasswd |
 | `linux/ssh-keys.sh` | credentials | SSH private keys, authorized_keys, known_hosts |
 | `linux/enum-credentials.sh` | credentials | AWS keys, Docker creds, .env files, history, tokens |
+| `linux/enum-cloud-credentials.sh` | credentials | EC2/Azure/GCP IMDS endpoints, IAM role tokens, expiry, blast radius notes |
 | `linux/enum-user-history.sh` | evidence | Shell history files, suspicious execution patterns, SSH config references |
+| `linux/collect-evidence.sh` | evidence | Volatile state snapshot — sessions, connections, processes, disk state, auth logs |
 | `linux/ansible-triage.sh` | pivot | Ansible config, inventory targets, private-key references, SSH host hints |
 | `linux/enum-vpn-creds.sh` | pivot | OpenVPN, WireGuard, NetworkManager VPN profiles, endpoint and auth references |
 | `linux/enum-cifs-creds.sh` | pivot | SMB/CIFS mounts, credential files, target shares, history hits |
+| `linux/enum-reachability.sh` | pivot | TCP reachability probe via /dev/tcp across a target range |
 | `linux/enum-network.sh` | network | Interfaces, routes, iptables, connections, DNS, ARP |
 | `linux/enum-system.sh` | system | Users, packages, services, crons, SUID, kernel |
 | `linux/enum-configs.sh` | system | Service configs (apache, mysql, sshd, samba, etc.) |
@@ -58,16 +61,20 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 | `linux/privesc-check.sh` | privesc | sudo -l, SUID, capabilities, writable paths |
 | `linux/triage.sh` | meta | One-shot Linux triage runner that combines the core gather categories |
 
-### Windows
+### Windows — 28 scripts
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
 | `windows/first-look.ps1` | situational | 30-sec snapshot: who's on, connections, recent files, suspicious tasks/services, Defender state |
 | `windows/hashdump.ps1` | credentials | SAM/SYSTEM hive export (requires admin) |
+| `windows/lsass-dump.ps1` | credentials | PPL/Credential Guard pre-flight, comsvcs.dll MiniDump, cleanup reminder |
 | `windows/enum-credentials.ps1` | credentials | Credential Manager, vault, WiFi, cached logons |
 | `windows/enum-unattend-autologon.ps1` | credentials | Unattend/sysprep files, autologon registry values, and plaintext credential hints |
 | `windows/psreadline-history.ps1` | credentials | PowerShell command history across user profiles, plus suspicious command hits |
+| `windows/enum-cloud-credentials.ps1` | credentials | EC2/Azure/GCP IMDS endpoints, managed identities, expiry, blast radius notes |
+| `windows/collect-evidence.ps1` | evidence | Volatile state capture — sessions, processes, connections, event log snapshots |
 | `windows/putty-sessions.ps1` | pivot | PuTTY saved sessions, stored SSH host keys, referenced key-file paths, Pageant presence |
+| `windows/enum-reachability.ps1` | pivot | TCP reachability probe via Test-NetConnection across a target range |
 | `windows/enum-network.ps1` | network | Interfaces, routes, firewall, connections, DNS, shares |
 | `windows/enum-dnscache.ps1` | network | DNS client cache entries and suspicious destination hints |
 | `windows/enum-rasvpn-events.ps1` | network | Microsoft RemoteAccess / RAS VPN client and server connection/authentication events |
@@ -87,19 +94,29 @@ Structured gather scripts that run native OS commands on compromised hosts to en
 | `windows/enum-ad-spns.ps1` | domain | SPN-bearing user/computer accounts and Kerberoastable targets |
 | `windows/enum-ad-computers.ps1` | domain | Domain computer inventory, OS fields, naming clues, managedBy hints |
 
-### macOS
+### macOS — 11 scripts
 
 | Script | Category | What It Collects |
 |--------|----------|------------------|
 | `macos/first-look.sh` | situational | 30-sec snapshot: who's on, connections, staging areas, launchd persistence, security state |
+| `macos/collect-evidence.sh` | evidence | Volatile state snapshot — sessions, connections, processes, launchd jobs, auth log |
 | `macos/enum-system.sh` | system | `sw_vers`, hardware/software profile, users, launchd jobs, FileVault/SIP state |
 | `macos/enum-network.sh` | network | Interfaces, routes, DNS, proxies, Wi-Fi prefs, live connections, ARP |
 | `macos/enum-persistence.sh` | persistence | LaunchDaemons, LaunchAgents, shell/profile hooks, autologin, cron/at artifacts |
 | `macos/enum-credentials.sh` | credentials | Keychain metadata, SSH/GPG material, shell history, cloud tokens, autologin hints |
+| `macos/ssh-keys.sh` | credentials | SSH private keys, authorized_keys, known_hosts, per-key fingerprints across /Users |
 | `macos/enum-remote-access-artifacts.sh` | pivot | Airport/Wi‑Fi details, VNC/screensharing, Safari last session, SSH remote-access traces |
 | `macos/enum-launchd.sh` | persistence | Loaded `launchctl` jobs plus launchd plist labels, programs, watch paths, and logging paths |
 | `macos/enum-unified-logs.sh` | logs | Recent `log show` output for launchd, auth, exec/spawn, and network activity |
 | `macos/enum-browser-artifacts.sh` | browser | Safari, Chrome, and Firefox artifact locations and recent session/history metadata |
+
+### Network devices — 3 scripts
+
+| Script | Category | What It Collects |
+|--------|----------|------------------|
+| `network-device/cisco-ios.sh` | reference | Cisco IOS/IOS-XE sessions, routing, AAA, VPN, logging, software integrity |
+| `network-device/cisco-nxos.sh` | reference | Cisco NX-OS VLANs, CDP/LLDP, accounting log, NTP |
+| `network-device/juniper-junos.sh` | reference | Juniper JunOS security policies, IKE/IPsec, interactive-commands log |
 
 ## First Look — 30-Second Situational Awareness
 

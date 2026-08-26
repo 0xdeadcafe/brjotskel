@@ -1,6 +1,6 @@
 # Playbook Inventory
 
-96 native-OS scripts across all skill categories. Nothing is uploaded to target hosts — all scripts use commands already present on the target OS.
+101 native-OS scripts across all core skill categories. Scripts use commands already present on the target OS; run inline when possible or temporarily stage script text with cleanup. No third-party binaries land on targets.
 
 ---
 
@@ -32,7 +32,7 @@ Broad collection scripts. Run these to understand a host's state, recover creden
 | `privesc-check.sh` | privesc | `sudo -l`, SUID, capabilities, writable privileged paths |
 | `triage.sh` | meta | One-shot runner combining all core gather categories |
 
-### Windows — 27 scripts
+### Windows — 28 scripts
 
 | Script | Category | What it collects |
 |--------|----------|-----------------|
@@ -65,7 +65,7 @@ Broad collection scripts. Run these to understand a host's state, recover creden
 | `enum-ad-computers.ps1` | domain | Domain computer inventory, OS fields, naming clues, managedBy hints |
 | `enum-cloud-credentials.ps1` | credentials | EC2/Azure/GCP IMDS endpoints, attached IAM roles/managed identities, expiry, blast radius notes |
 
-### macOS — 10 scripts
+### macOS — 11 scripts
 
 | Script | Category | What it collects |
 |--------|----------|-----------------|
@@ -75,6 +75,7 @@ Broad collection scripts. Run these to understand a host's state, recover creden
 | `enum-network.sh` | network | Interfaces, routes, DNS, proxies, Wi-Fi preferences, live connections, ARP |
 | `enum-persistence.sh` | persistence | LaunchDaemons, LaunchAgents, shell/profile hooks, autologin, cron artifacts |
 | `enum-credentials.sh` | credentials | Keychain metadata, SSH/GPG material, shell history, cloud tokens, autologin hints |
+| `ssh-keys.sh` | credentials | SSH private keys, authorized_keys, known_hosts, per-key fingerprints across `/Users` |
 | `enum-remote-access-artifacts.sh` | pivot | Wi-Fi details, VNC/screensharing, Safari last session, SSH remote-access traces |
 | `enum-launchd.sh` | persistence | Loaded `launchctl` jobs, plist labels, programs, watch paths, logging paths |
 | `enum-unified-logs.sh` | logs | `log show` output for launchd, auth, exec/spawn, and network activity |

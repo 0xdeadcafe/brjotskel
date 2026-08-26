@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""clean-local — Safe cleanup for ignored developer/scratch state.
+
+Dry-run by default. Use --execute to delete. Case data (logs/, workspace/) is never
+touched unless --include-case-data is also supplied.
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+from pathlib import Path
+
+DEFAULT_DIRS = ["temp", ".pytest_cache", "node_modules", ".npm", ".pi/npm/node_modules"]
+CASE_DIRS = ["logs", "workspace"]
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def inside_root(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def collect_targets(root: Path, include_case_data: bool = False) -> list[Path]:
+    targets: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except FileNotFoundError:
+            return
+        if not inside_root(root, resolved):
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        targets.append(path)
+
+    for rel in DEFAULT_DIRS:
+        path = root / rel
+        if path.exists():
+            add(path)
+
+    for path in root.rglob("__pycache__"):
+        if path.is_dir():
+            add(path)
+    for path in root.rglob("*.pyc"):
+        if path.is_file():
+            add(path)
+
+    if include_case_data:
+        for rel in CASE_DIRS:
+            path = root / rel
+            if path.exists():
+                add(path)
+
+    # Remove nested paths when a parent directory is already selected.
+    filtered: list[Path] = []
+    resolved_dirs = [p.resolve() for p in targets if p.is_dir()]
+    for path in targets:
+      resolved = path.resolve()
+      if any(parent != resolved and inside_root(parent, resolved) for parent in resolved_dirs):
+          continue
+      filtered.append(path)
+    return sorted(filtered, key=lambda p: str(p))
+
+
+def path_size(path: Path) -> int:
+    if path.is_file() or path.is_symlink():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file() or item.is_symlink():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def fmt_size(n: int) -> str:
+    units = ["B", "K", "M", "G"]
+    value = float(n)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f}{unit}" if unit != "B" else f"{int(value)}B"
+        value /= 1024
+    return f"{n}B"
+
+
+def remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Dry-run cleanup for ignored local brjotskel scratch/cache state.")
+    parser.add_argument("--execute", action="store_true", help="Actually delete selected paths")
+    parser.add_argument("--include-case-data", action="store_true", help="Also delete logs/ and workspace/ contents/directories. Dangerous.")
+    parser.add_argument("--root", default=str(repo_root()), help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    root = Path(args.root).resolve()
+    targets = collect_targets(root, args.include_case_data)
+    mode = "DELETE" if args.execute else "DRY-RUN"
+
+    print(f"clean-local: {mode} root={root}")
+    if not args.include_case_data:
+        print("case data protected: logs/ and workspace/ are not touched")
+    else:
+        print("WARNING: case data included: logs/ and workspace/ may be removed")
+
+    if not targets:
+        print("no cleanup targets found")
+        return 0
+
+    total = 0
+    for target in targets:
+        size = path_size(target)
+        total += size
+        print(f"{fmt_size(size):>8}  {target.relative_to(root)}")
+        if args.execute:
+            remove(target)
+
+    print(f"total selected: {fmt_size(total)}")
+    if not args.execute:
+        print("dry run only; rerun with --execute to delete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

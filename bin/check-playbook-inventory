@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Validate playbook inventory counts in docs against the filesystem.
+
+Inventory rule: count operator-facing native OS playbooks under platform directories
+for gather, host-IR, containment, eradication, and privilege-escalation skills.
+Helper lookup scripts under */scripts are not counted.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+CATEGORIES = {
+    "Gather": ("gather-playbooks", ["linux", "windows", "macos", "network-device"]),
+    "Host IR": ("host-ir-playbooks", ["linux", "windows", "macos"]),
+    "Containment": ("containment-playbooks", ["linux", "windows", "macos"]),
+    "Eradication": ("eradication-playbooks", ["linux", "windows", "macos"]),
+    "Privilege escalation": ("escalate-playbook", ["linux", "windows", "macos"]),
+}
+
+PLATFORMS = ["linux", "windows", "macos", "network-device"]
+README_PLATFORM_NAMES = {
+    "linux": "Linux",
+    "windows": "Windows",
+    "macos": "macOS",
+    "network-device": "Network devices",
+}
+DOC_HEADING_NAMES = {
+    "linux": "Linux",
+    "windows": "Windows",
+    "macos": "macOS",
+    "network-device": "Network devices",
+}
+
+
+def count_scripts(skill_dir: str, platform: str) -> int:
+    path = REPO / ".pi" / "skills" / skill_dir / platform
+    if not path.exists():
+        return 0
+    return sum(1 for item in path.iterdir() if item.is_file() and item.suffix in {".sh", ".ps1"})
+
+
+def matrix() -> dict[str, dict[str, int]]:
+    return {
+        category: {platform: count_scripts(skill_dir, platform) for platform in PLATFORMS}
+        for category, (skill_dir, platforms) in CATEGORIES.items()
+    }
+
+
+def md_count(value: int) -> str:
+    return str(value) if value else "—"
+
+
+def require(condition: bool, message: str, failures: list[str]) -> None:
+    if not condition:
+        failures.append(message)
+
+
+def main() -> int:
+    counts = matrix()
+    total = sum(sum(row.values()) for row in counts.values())
+    failures: list[str] = []
+
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    playbooks = (REPO / "docs" / "playbooks.md").read_text(encoding="utf-8")
+    skill = (REPO / ".pi" / "skills" / "gather-playbooks" / "SKILL.md").read_text(encoding="utf-8")
+
+    require(re.search(rf"\b{total}\s+native-OS (?:playbook )?scripts\b", readme) is not None,
+            f"README.md must advertise {total} native-OS scripts", failures)
+    require(re.search(rf"\b{total}\s+native-OS scripts\b", playbooks) is not None,
+            f"docs/playbooks.md must advertise {total} native-OS scripts", failures)
+
+    for category, row in counts.items():
+        expected = "| " + category + " | " + " | ".join(md_count(row[p]) for p in PLATFORMS) + " |"
+        require(expected in readme, f"README.md missing inventory row: {expected}", failures)
+
+    for platform in PLATFORMS:
+        gather = counts["Gather"][platform]
+        if gather:
+            name = DOC_HEADING_NAMES[platform]
+            heading_re = rf"### {re.escape(name)} — {gather} (?:reference )?scripts"
+            require(re.search(heading_re, playbooks) is not None,
+                    f"docs/playbooks.md missing gather heading count for {name}: {gather}", failures)
+            require(re.search(heading_re, skill) is not None,
+                    f"gather SKILL.md missing heading count for {name}: {gather}", failures)
+
+    for platform in ["linux", "windows", "macos", "network-device"]:
+        name = README_PLATFORM_NAMES[platform]
+        gather = counts["Gather"][platform]
+        ir = counts["Host IR"][platform]
+        if platform == "network-device":
+            pattern = rf"\| {re.escape(name)} \| [^|]+ \| {gather} \| — \| — \|"
+        else:
+            pattern = rf"\| {re.escape(name)} \| [^|]+ \| {gather} \| {ir} \| ✓ \|"
+        require(re.search(pattern, readme) is not None,
+                f"README.md platform coverage mismatch for {name}: gather={gather}, ir={ir}", failures)
+
+    if failures:
+        print("playbook inventory check: FAIL", file=sys.stderr)
+        for failure in failures:
+            print(f"- {failure}", file=sys.stderr)
+        print("\nComputed matrix:", file=sys.stderr)
+        for category, row in counts.items():
+            print(f"  {category}: {row}", file=sys.stderr)
+        return 1
+
+    print(f"playbook inventory check: OK ({total} scripts)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

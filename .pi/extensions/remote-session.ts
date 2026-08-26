@@ -58,18 +58,15 @@
  *   - pwsh (PowerShell) — optional, for WinRM
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync, existsSync, readFileSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
 import { chooseSessionName, buildMarkerCommand, buildTunnelSshArgs, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseHostPortTarget, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, relayVerifyOutputConfirmsListening, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
-import { parseShortcutArgs, formatLandShortcut, formatAssessShortcut, formatPursueShortcut, formatContainShortcut, formatEradicateShortcut, formatVerifyShortcut, buildAssessPrompt, buildPursuePrompt, buildContainPrompt, buildEradicatePrompt, buildVerifyPrompt, type OperatorSessionSummary, type PursueIntelSnapshot } from "./lib/operator-shortcuts.ts";
-import { parseYaml } from "./lib/simple-yaml.ts";
-import { resolveIntelDir } from "./lib/intel-helpers.ts";
-import { buildIntelMap } from "./lib/intel-store-core.ts";
-import { type Protocol, type TunnelType, type SessionInfo, type RemoteSession, type TunnelInfo, type RelayInfo, MARKER_PREFIX, MARKER_SUFFIX, COMMAND_TIMEOUT_MS, generateMarker, generateId, killTrackedProcess, logToSession as _logToSession, getLogPath as _getLogPath } from "./lib/remote-types.ts";
+import { registerRemoteSlashCommands } from "./lib/operator-runtime.ts";
+import { type Protocol, type TunnelType, type SessionInfo, type RemoteSession, type TunnelInfo, type RelayInfo, MARKER_PREFIX, MARKER_SUFFIX, COMMAND_TIMEOUT_MS, generateMarker, generateId, killTrackedProcess, logToSession as _logToSession, getLogPath as _getLogPath, resolveRemoteSessionLogDir } from "./lib/remote-types.ts";
 import { connectSSH } from "./lib/protocol-adapters/ssh.ts";
 import { connectWinRM } from "./lib/protocol-adapters/winrm.ts";
 import { connectTCP, connectTelnet } from "./lib/protocol-adapters/tcp-telnet.ts";
@@ -89,11 +86,13 @@ let tunnelCounter = 0;
 let relayCounter = 0;
 let defaultSessionName: string | null = null;
 
-const LOG_DIR = join(process.cwd(), "logs", "remote-sessions");
+function currentRemoteLogDir(): string {
+  return resolveRemoteSessionLogDir(process.cwd(), process.env);
+}
 
-// Bound log helper — avoids repeating LOG_DIR on every call
+// Bound log helper — resolves BRJOTSKEL_LOG_DIR at call time for case-specific logging.
 function log(sessionName: string, direction: ">>>" | "<<<" | "---", content: string): void {
-  _logToSession(LOG_DIR, sessionName, direction, content);
+  _logToSession(currentRemoteLogDir(), sessionName, direction, content);
 }
 
 function getSession(name?: string): RemoteSession {
@@ -307,7 +306,7 @@ export default function (pi: ExtensionAPI) {
             ? "\nMode: Telnet best-effort with basic option negotiation"
             : "";
         return {
-          content: [{ type: "text", text: `Connected: session '${params.name}' → ${params.target} via ${params.protocol.toUpperCase()}\nPlatform: ${session!.info.platform}${proxyInfo}${modeNote}\nActive sessions: ${sessions.size}\nLog: ${_getLogPath(LOG_DIR, params.name)}` }],
+          content: [{ type: "text", text: `Connected: session '${params.name}' → ${params.target} via ${params.protocol.toUpperCase()}\nPlatform: ${session!.info.platform}${proxyInfo}${modeNote}\nActive sessions: ${sessions.size}\nLog: ${_getLogPath(currentRemoteLogDir(), params.name)}` }],
           details: { session: session!.info, totalSessions: sessions.size },
         };
       } catch (err: any) {
@@ -889,341 +888,13 @@ export default function (pi: ExtensionAPI) {
   // -------------------------------------------------------------------
   // Slash Commands
   // -------------------------------------------------------------------
-
-  // Intel snapshot helper for /pursue and /scope
-  function readIntelSnapshot(): { pursue: PursueIntelSnapshot | null; raw: { hosts: Record<string, any>; credentials: Record<string, any>; accounts: Record<string, any>; pivots: Record<string, any>; timeline: any[] } | null } {
-    try {
-      const intelDir = resolveIntelDir(process.cwd(), process.env.BRJOTSKEL_INTEL_DIR);
-      if (!existsSync(intelDir)) return { pursue: null, raw: null };
-      const read = (file: string): any => {
-        const p = join(intelDir, file);
-        if (!existsSync(p)) return {};
-        try { return parseYaml(readFileSync(p, "utf8")) ?? {}; } catch { return {}; }
-      };
-      const hosts       = read("hosts.yaml").hosts       ?? {};
-      const credentials = read("credentials.yaml").credentials ?? {};
-      const accounts    = read("accounts.yaml").accounts    ?? {};
-      const pivots      = read("pivots.yaml").paths         ?? {};
-      const timeline    = read("timeline.yaml").timeline    ?? [];
-      const inactiveStatuses = new Set(["rotated", "expired", "revoked", "disabled", "inactive", "invalid"]);
-      const unvalidatedCreds = Object.entries(credentials)
-        .filter(([_, c]: [string, any]) => !inactiveStatuses.has(c.status ?? ""))
-        .filter(([_, c]: [string, any]) => !c.valid_on || (c.valid_on as string[]).length === 0)
-        .map(([id, c]: [string, any]) => ({ id, type: c.type || "unknown", username: c.username || "", keyFile: c.key_file }));
-      const activeCreds = Object.entries(credentials)
-        .filter(([_, c]: [string, any]) => c.status === "active")
-        .map(([id, c]: [string, any]) => ({ id, type: c.type || "unknown", username: c.username || "", keyFile: c.key_file }));
-      const knownHostIps = Object.values(hosts).map((h: any) => h.ip).filter(Boolean) as string[];
-      const knownHostIds = Object.keys(hosts);
-      return { pursue: { unvalidatedCreds, activeCreds, knownHostIps, knownHostIds }, raw: { hosts, credentials, accounts, pivots, timeline } };
-    } catch {
-      return { pursue: null, raw: null };
-    }
-  }
-
-  function operatorSessions(): OperatorSessionSummary[] {
-    return [...sessions.values()].map(session => ({
-      name: session.info.name,
-      protocol: session.info.protocol,
-      target: session.info.target,
-      platform: session.info.platform,
-      commandCount: session.info.commandCount,
-    }));
-  }
-
-  function pickOperatorSession(args?: string): OperatorSessionSummary | undefined {
-    const parsed = parseShortcutArgs(args);
-    const available = operatorSessions();
-    const selectedName = parsed.sessionName || (defaultSessionName && sessions.has(defaultSessionName) ? defaultSessionName : (available.length === 1 ? available[0].name : undefined));
-    return selectedName ? available.find(s => s.name === selectedName) : undefined;
-  }
-
-  function sessionCompletions(prefix: string) {
-    const base = [...sessions.keys()].map(name => ({ value: name, label: name, description: "active remote session" }));
-    if (!prefix) return base;
-    return base.filter(item => item.value.startsWith(prefix));
-  }
-
-  function showOrStage(ctx: any, shouldStage: boolean, promptText: string | undefined, displayText: string): void {
-    if (shouldStage && promptText) {
-      ctx.ui.setEditorText(promptText);
-      ctx.ui.notify("Staged phase prompt in editor. Press Enter to run or edit first.", "info");
-      return;
-    }
-    ctx.ui.notify(displayText, "info");
-  }
-
-  pi.registerCommand("land", {
-    description: "Operator shortcut: landing/access primitives and immediate next action",
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      if (parsed.help) {
-        ctx.ui.notify("Usage: /land\nShows fast access, pivot, and post-landing prompts. No case/report workflow.", "info");
-        return;
-      }
-      ctx.ui.notify(formatLandShortcut(operatorSessions()), "info");
-    },
-  });
-
-  pi.registerCommand("assess", {
-    description: "Operator shortcut: first-look and high-signal assessment commands for a session",
-    getArgumentCompletions: sessionCompletions,
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      const session = pickOperatorSession(args);
-      const display = formatAssessShortcut(session, operatorSessions());
-      showOrStage(ctx, parsed.prompt, session ? buildAssessPrompt(session) : undefined, display);
-    },
-  });
-
-  pi.registerCommand("pursue", {
-    description: "Operator shortcut: credential/pivot chase board with pre-built validation commands",
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      const { pursue: intelSnap } = readIntelSnapshot();
-      const display = formatPursueShortcut(operatorSessions(), intelSnap);
-      showOrStage(ctx, parsed.prompt, buildPursuePrompt(), display);
-    },
-  });
-
-  pi.registerCommand("contain", {
-    description: "Operator shortcut: evidence-first containment command pack for a session",
-    getArgumentCompletions: sessionCompletions,
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      const session = pickOperatorSession(args);
-      const display = formatContainShortcut(session, operatorSessions());
-      showOrStage(ctx, parsed.prompt, session ? buildContainPrompt(session) : undefined, display);
-    },
-  });
-
-  pi.registerCommand("eradicate", {
-    description: "Operator shortcut: evidence-backed eradication command pack for a session",
-    getArgumentCompletions: sessionCompletions,
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      const session = pickOperatorSession(args);
-      const display = formatEradicateShortcut(session, operatorSessions());
-      showOrStage(ctx, parsed.prompt, session ? buildEradicatePrompt(session) : undefined, display);
-    },
-  });
-
-  pi.registerCommand("verify", {
-    description: "Operator shortcut: post-containment/eradication verification commands for a session",
-    getArgumentCompletions: sessionCompletions,
-    handler: async (args, ctx) => {
-      const parsed = parseShortcutArgs(args);
-      const session = pickOperatorSession(args);
-      const display = formatVerifyShortcut(session, operatorSessions());
-      showOrStage(ctx, parsed.prompt, session ? buildVerifyPrompt(session) : undefined, display);
-    },
-  });
-
-  pi.registerCommand("scope", {
-    description: "Situational dump: active sessions, tunnels, intel counts, and last 5 timeline entries",
-    handler: async (_args, ctx) => {
-      const lines: string[] = ["=== SCOPE ===", ""];
-
-      // Active sessions
-      if (sessions.size === 0) {
-        lines.push("Sessions: none");
-      } else {
-        lines.push(`Sessions (${sessions.size}):`);
-        for (const [name, s] of sessions) {
-          const isDefault = name === defaultSessionName ? " *" : "";
-          const taint = s.tainted ? " [TAINTED]" : "";
-          lines.push(`  ${s.process.killed ? "✗" : "✓"} ${name}${isDefault} → ${s.info.protocol}://${s.info.target} (${s.info.platform}, ${s.info.commandCount} cmds)${taint}`);
-        }
-      }
-
-      // Tunnels & relays
-      if (activeTunnels.length > 0) {
-        lines.push("");
-        lines.push(`Tunnels (${activeTunnels.length}):`);
-        for (const t of activeTunnels) {
-          const alive = !t.process.killed && t.process.exitCode === null;
-          lines.push(`  ${alive ? "✓" : "✗"} [${t.id}] ${t.type} :${t.localPort} via ${t.via}`);
-        }
-      }
-      if (activeRelays.length > 0) {
-        lines.push("");
-        lines.push(`Relays (${activeRelays.length}):`);
-        for (const r of activeRelays) {
-          lines.push(`  [${r.id}] ${r.method} ${r.session}:${r.listenPort} → ${r.targetHost}:${r.targetPort}`);
-        }
-      }
-
-      // Intel store snapshot
-      const { raw } = readIntelSnapshot();
-      lines.push("");
-      if (!raw) {
-        lines.push("Intel: not initialized");
-      } else {
-        const hCount  = Object.keys(raw.hosts).length;
-        const cCount  = Object.keys(raw.credentials).length;
-        const aCount  = Object.keys(raw.accounts).length;
-        const pCount  = Object.keys(raw.pivots).length;
-        const tCount  = Array.isArray(raw.timeline) ? raw.timeline.length : 0;
-        const dirty   = Object.values(raw.hosts).filter((h: any) => h.status === "compromised").length;
-        const activeCreds = Object.values(raw.credentials).filter((c: any) => c.status === "active").length;
-        const unvalidated = Object.values(raw.credentials).filter((c: any) => !(["rotated","expired","revoked","disabled","inactive","invalid"].includes(c.status ?? "")) && (!c.valid_on || (c.valid_on as string[]).length === 0)).length;
-        lines.push(`Intel: ${hCount} hosts (${dirty} compromised) | ${cCount} creds (${activeCreds} active, ${unvalidated} unvalidated) | ${aCount} accounts | ${pCount} pivots | ${tCount} events`);
-        // Last 5 timeline entries
-        if (Array.isArray(raw.timeline) && raw.timeline.length > 0) {
-          lines.push("");
-          lines.push("Last 5 events:");
-          raw.timeline.slice(-5).reverse().forEach((e: any) => {
-            lines.push(`  ${(e.timestamp || "").slice(0, 19).replace("T", " ")}  ${e.summary || ""}`);
-          });
-        }
-      }
-
-      ctx.ui.notify(lines.join("\n"), "info");
-    },
-  });
-
-  pi.registerCommand("map", {
-    description: "Attack graph: host nodes, credential blast radius, accounts, pivot chains",
-    handler: async (_args, ctx) => {
-      const { raw } = readIntelSnapshot();
-      if (!raw) {
-        ctx.ui.notify("Intel store not initialized. Run intel_add to record findings first.", "info");
-        return;
-      }
-      const activeSessionNames = new Set([...sessions.keys()]);
-      const map = buildIntelMap(raw.hosts, raw.credentials, raw.accounts, raw.pivots, { activeSessions: activeSessionNames });
-      ctx.ui.notify(map, "info");
-    },
-  });
-
-  pi.registerCommand("report", {
-    description: "Incident summary: host status, credential rotation requirements, last 3 timeline events",
-    handler: async (_args, ctx) => {
-      // Resolve ir-report path: prefer PATH, fall back to container-default location
-      const irReportBin =
-        spawnSync("which", ["ir-report"], { encoding: "utf8" }).stdout?.trim() ||
-        "/opt/brjotskel/bin/ir-report";
-
-      const intelDir =
-        process.env.BRJOTSKEL_INTEL_DIR ||
-        join(process.cwd(), "workspace", "intel");
-
-      const result = spawnSync(
-        "python3",
-        [irReportBin, "--short", "--intel-dir", intelDir],
-        { encoding: "utf8", timeout: 15_000 },
-      );
-
-      if (result.error) {
-        ctx.ui.notify(`/report failed: ${result.error.message}`, "error");
-        return;
-      }
-      if (result.status !== 0) {
-        const errMsg = result.stderr?.trim() || `exit ${result.status}`;
-        ctx.ui.notify(`/report failed: ${errMsg}`, "error");
-        return;
-      }
-
-      const output = result.stdout?.trim() || "(no output)";
-      ctx.ui.notify(output, "info");
-    },
-  });
-
-  pi.registerCommand("remote-connect", {
-    handler: async (args, ctx) => {
-      if (!args) {
-        ctx.ui.notify("Usage: /remote-connect <ssh|winrm|tcp|telnet> <target> --name <name> (preview only; use remote_connect tool to connect)", "info");
-        return;
-      }
-      const parts = args.trim().split(/\s+/);
-      const protocol = parts[0];
-      const target = parts[1];
-      const nameIdx = parts.indexOf("--name");
-      const name = nameIdx >= 0 ? parts[nameIdx + 1] : target?.replace(/[^a-zA-Z0-9-]/g, "-") || "default";
-      ctx.ui.notify(`Preview: remote_connect(protocol=\"${protocol}\", target=\"${target}\", name=\"${name}\")`, "info");
-    },
-  });
-
-  pi.registerCommand("remote-disconnect", {
-    description: "Disconnect: /remote-disconnect <name|--all>",
-    handler: async (args, ctx) => {
-      if (args === "--all") {
-        for (const [name, session] of sessions) {
-          log(name, "---", "[SESSION END via /command]");
-          try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
-          killTrackedProcess(session.process);
-        }
-        const count = sessions.size;
-        sessions.clear();
-        defaultSessionName = null;
-        ctx.ui.setStatus("remote", undefined);
-        ctx.ui.notify(`Disconnected all ${count} session(s)`, "info");
-        return;
-      }
-      const name = args?.trim();
-      if (!name) {
-        ctx.ui.notify(`Active sessions: ${[...sessions.keys()].join(", ") || "none"}`, "info");
-        return;
-      }
-      const session = sessions.get(name);
-      if (!session) {
-        ctx.ui.notify(`Session '${name}' not found`, "error");
-        return;
-      }
-      log(name, "---", "[SESSION END via /command]");
-      try { session.process.stdin!.write("exit\n"); } catch { /* ignore */ }
-      killTrackedProcess(session.process);
-      sessions.delete(name);
-      if (defaultSessionName === name) defaultSessionName = sessions.size > 0 ? sessions.keys().next().value! : null;
-      ctx.ui.setStatus("remote", sessions.size > 0 ? ctx.ui.theme.fg("accent", `🔗 Sessions: ${[...sessions.keys()].join(", ")}`) : undefined);
-      ctx.ui.notify(`Disconnected '${name}'`, "info");
-    },
-  });
-
-  pi.registerCommand("sessions", {
-    description: "List active remote sessions, tunnels, and relays",
-    handler: async (_args, ctx) => {
-      if (sessions.size === 0 && activeTunnels.length === 0 && activeRelays.length === 0) {
-        ctx.ui.notify("No active sessions, tunnels, or relays", "info");
-        return;
-      }
-      const lines: string[] = [];
-      for (const [name, session] of sessions) {
-        const alive = !session.process.killed;
-        const isDefault = name === defaultSessionName ? " *" : "";
-        lines.push(`${alive ? "✓" : "✗"} ${name}${isDefault} → ${session.info.protocol}://${session.info.target} (${session.info.platform}, ${session.info.commandCount} cmds)`);
-      }
-      if (activeTunnels.length > 0) {
-        lines.push("");
-        for (const t of activeTunnels) {
-          const alive = !t.process.killed && t.process.exitCode === null;
-          lines.push(`${alive ? "✓" : "✗"} [${t.id}] ${t.type} localhost:${t.localPort} via ${t.via}`);
-        }
-      }
-      if (activeRelays.length > 0) {
-        lines.push("");
-        for (const r of activeRelays) {
-          const sessionAlive = sessions.has(r.session) && !sessions.get(r.session)!.process.killed;
-          lines.push(`${sessionAlive ? "✓" : "⚠"} [${r.id}] ${r.method} ${r.session}:${r.listenPort} → ${r.targetHost}:${r.targetPort}`);
-        }
-      }
-      ctx.ui.notify(lines.join("\n"), "info");
-    },
-  });
-
-  pi.registerCommand("tunnels", {
-    description: "List active SSH tunnels",
-    handler: async (_args, ctx) => {
-      if (activeTunnels.length === 0) {
-        ctx.ui.notify("No active tunnels", "info");
-        return;
-      }
-      const lines = activeTunnels.map(t => {
-        const alive = !t.process.killed && t.process.exitCode === null;
-        return `${alive ? "✓" : "✗"} [${t.id}] ${t.type} localhost:${t.localPort} via ${t.via} — ${t.description}`;
-      });
-      ctx.ui.notify(lines.join("\n"), "info");
-    },
+  registerRemoteSlashCommands(pi, {
+    sessions,
+    activeTunnels,
+    activeRelays,
+    getDefaultSessionName: () => defaultSessionName,
+    setDefaultSessionName: (name) => { defaultSessionName = name; },
+    log,
   });
 
   // -------------------------------------------------------------------

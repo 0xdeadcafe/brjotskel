@@ -10,20 +10,51 @@
 #   ir-search audit              # audit logs only
 #   ir-search sessions           # session command logs only
 #   ir-search <grep-pattern>     # pre-filter then fzf
+#   ir-search --record-hit <line> # internal/test helper: append a selected hit
 #
 # Environment:
 #   BRJOTSKEL_LOG_DIR — log directory (default: logs)
+#   BRJOTSKEL_IR_SEARCH_HITS — selected-hit file (default: $BRJOTSKEL_LOG_DIR/ir-search-hits.txt)
 #
 # Requires: fzf (installed in container), rg or grep
 set -euo pipefail
 
 log_dir="${BRJOTSKEL_LOG_DIR:-logs}"
+hits_file="${BRJOTSKEL_IR_SEARCH_HITS:-$log_dir/ir-search-hits.txt}"
 mode="${1:-all}"
+
+record_hit() {
+  local hit="$1"
+  local hit_dir
+  hit_dir="$(dirname "$hits_file")"
+  mkdir -p "$hit_dir"
+  printf '%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$hit" >> "$hits_file"
+}
+
+if [[ "$mode" == "--record-hit" ]]; then
+  shift || true
+  if [[ "$#" -eq 0 ]]; then
+    echo "Usage: ir-search --record-hit <selected-line>" >&2
+    exit 2
+  fi
+  record_hit "$*"
+  echo "Recorded ir-search hit: $hits_file"
+  exit 0
+fi
 
 if ! command -v fzf >/dev/null 2>&1; then
   echo "fzf not found. Install with: apt-get install fzf" >&2
   exit 1
 fi
+
+if script_path="$(readlink -f "$0" 2>/dev/null)"; then
+  :
+else
+  script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+fi
+export BRJOTSKEL_LOG_DIR
+export BRJOTSKEL_IR_SEARCH_HITS="$hits_file"
+export IR_SEARCH_SCRIPT="$script_path"
 
 # Collect log files to search
 audit_logs=()
@@ -52,8 +83,9 @@ case "$mode" in
       grep -h "$mode" "${all_files[@]}" 2>/dev/null | \
         fzf --ansi --no-sort --reverse --tac \
             --prompt="ir-search> " \
-            --header="Filtered: $mode  |  Enter to copy  |  Ctrl-C to exit" \
-            --preview 'echo {}' --preview-window=down:3:wrap
+            --header="Filtered: $mode  |  Enter=save hit to $hits_file + print  |  Ctrl-C=exit" \
+            --preview 'echo {}' --preview-window=down:3:wrap \
+            --bind 'enter:execute-silent("$IR_SEARCH_SCRIPT" --record-hit {})+accept'
     fi
     exit 0
     ;;
@@ -64,14 +96,7 @@ if [[ "${#files[@]}" -eq 0 ]]; then
   exit 0
 fi
 
-# FZF with file+line preview showing context
-# Use rg for speed if available, otherwise grep
-if command -v rg >/dev/null 2>&1; then
-  search_cmd="rg --no-filename --color always {q}"
-else
-  search_cmd="grep --color=always {q}"
-fi
-
+# FZF with file+line preview showing context.
 # Annotate each line with its source file for context
 {
   for f in "${files[@]}"; do
@@ -86,7 +111,7 @@ fi
     --reverse \
     --tac \
     --prompt="ir-search> " \
-    --header="$mode logs  |  Tab=select  |  Enter=copy to clipboard  |  Ctrl-C=exit" \
+    --header="$mode logs  |  Tab=select  |  Enter=save hit to $hits_file + print  |  Ctrl-C=exit" \
     --preview 'echo {}' \
     --preview-window=down:3:wrap \
-    --bind 'enter:execute(echo {} | xclip -selection clipboard 2>/dev/null || echo {} | pbcopy 2>/dev/null || echo {})+abort'
+    --bind 'enter:execute-silent("$IR_SEARCH_SCRIPT" --record-hit {})+accept'

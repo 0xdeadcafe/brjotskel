@@ -4,5 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 bash bin/smoke-check
+bin/check-playbook-inventory
 python3 -m unittest discover -s tests/python -v
 node --test --experimental-strip-types tests/node/*.test.mjs

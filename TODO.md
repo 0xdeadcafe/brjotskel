@@ -2,114 +2,88 @@
 
 Product backlog and engineering roadmap. Ghost review pass — attacker-first framing throughout.
 
-> **Test status:** `bash bin/test` — 29 Python + 88 Node tests, all passing. Docker smoke build: ✅.
+> **Test status:** `bash bin/test` — 41 Python + 95 Node tests, all passing. Docker smoke build is configured in CI; rerun locally after dependency pinning or Dockerfile changes.
+
+---
+
+## Priority lens
+
+- **P0**: blocks safe operation now or creates uncontrolled evidence/secret exposure by default.
+- **P1**: fix before the next real incident image is trusted — reproducibility, integrity, report correctness.
+- **P2**: high operator leverage — reduces manual misses and closes workflow gaps.
+- **P3**: simplification, drift control, developer ergonomics, bloat reduction.
+
+## Recommended execution order
+
+1. **#44** — P0. Stop default raw secret sprawl. Current Linux/cloud/credential gather paths can leak usable material into session logs.
+2. **#14** — P1. Pin the build before trusting a new incident image. Reproducibility is part of evidence credibility.
+3. **#48** — P2. Package evidence/reports after #44, so archives do not preserve today’s secret leakage.
+4. **#20** — P3. Cheap image-size/CI cleanup; safe to batch with #14 if already editing Dockerfile.
+5. **#52** — P3. Defer tmux backend as a prototype only; useful for SSH/telnet, risky until secret-output policy is settled.
 
 ---
 
 ## 🔴 P0 — Blocker
 
-*Nothing currently at P0.*
+### 44. Secret handling is split-brain: gather scripts dump secrets into logs, intel store separately stores secrets
+
+Credential recovery currently means secrets often appear in remote session logs, then the operator manually copies them into `workspace/intel` and `intel_add`. That creates two secret stores: intel and logs. Current defaults are too hot: Linux `ssh-keys.sh` and `triage.sh` can print private keys, Linux/cloud scripts can print static keys/tokens, and Windows credential/cloud/LAPS paths can print usable credential material. This expands rotation scope to operator logs, report packages, terminal scrollback, and any copied transcript.
+
+- **Risk:** Dirty by default. A normal gather run can leak usable credentials into long-lived logs before the operator chooses to promote them into intel.
+- **Action:** Define a secret-output policy: default output fingerprints/paths/context/redacted values only; raw material requires explicit `--reveal` or clearly named reveal scripts. Add a promotion path that writes recovered key/token material to `workspace/intel/keys/` or `workspace/intel/secrets/` with 0600 permissions and records provenance. Update gather scripts and docs to match. Add tests/grep guard for banned default raw-secret patterns where practical.
+- **Files:** `.pi/skills/gather-playbooks/linux/ssh-keys.sh`, `.pi/skills/gather-playbooks/linux/triage.sh`, `.pi/skills/gather-playbooks/linux/enum-cloud-credentials.sh`, `.pi/skills/gather-playbooks/macos/ssh-keys.sh`, `.pi/skills/gather-playbooks/windows/enum-credentials.ps1`, `.pi/skills/gather-playbooks/windows/enum-cloud-credentials.ps1`, `.pi/skills/gather-playbooks/windows/enum-ad.ps1`, `docs/runbook.md`, `docs/intel-import-workflow.md`, `bin/smoke-check`
 
 ---
 
-## 🟠 P1 — Bug: fix before the next incident
-
-### 39. `intel_scan` writes timeline entries without a timestamp
-
-`intel-scan.ts` calls `appendTimelineEntry()` with no `timestamp` field. The `/scope` command reads `e.timestamp || ""` — blank. `ir-report --short` reads `entry.get("ts") or entry.get("timestamp") or ""` — also blank. Every host discovered via `intel_scan` shows a blank timestamp in the last-5-events view and in the incident brief.
-
-This is a one-line fix.
-
-- **Action:** Add `timestamp: new Date().toISOString()` to the `appendTimelineEntry` call in `intel-scan.ts` (lines 174–179). Add a test in `tests/node/intel-scan.test.mjs` that confirms the timeline entry includes a non-empty `timestamp` field.
-- **Files:** `.pi/extensions/intel-scan.ts`, `tests/node/intel-scan.test.mjs`
-
----
-
-## 🟡 P2 — Meaningful capability gaps
-
-### 36. `/pursue` only validates SMB for password and NTLM hash credentials
-
-`credValidationCmd()` generates `netexec smb <hosts>` for NTLM hashes and `netexec smb` for passwords. In hardened environments — DMZs, segmented Windows networks — SMB (445) is commonly blocked while WinRM (5985) and SSH (22) are open. Ghost sprays SMB, gets nothing, thinks the credential is dead. It works fine on WinRM. Missed pivot.
-
-The chase board should emit three commands for password and NTLM-hash type credentials: SMB, WinRM, and SSH. SSH is already generated for ssh-key types. It's missing for password and hash.
-
-- **Action:** Update `credValidationCmd()` in `lib/operator-shortcuts.ts` so password and ntlm-hash types generate all three validation commands: `netexec smb`, `netexec winrm`, `netexec ssh` against the same host list. The same applies to the credential validation hint in `intel_add` (`intel-store.ts`). Add test coverage for the multi-protocol output.
-- **Files:** `.pi/extensions/lib/operator-shortcuts.ts`, `.pi/extensions/intel-store.ts`, `tests/node/operator-shortcuts.test.mjs`
-
----
-
-### 37. `/pursue` doesn't surface `secretsdump` when a hash is confirmed on a Windows host
-
-When an NTLM hash is validated and `valid_on` includes a host, the natural next move depends on the host's role. If it's a Domain Controller — `secretsdump.py` against NTDS, not more netexec spraying. The chase board doesn't surface this. Ghost finds a Domain Admin hash, confirms it on dc01, and has to manually remember to run secretsdump. The runbook documents it; the chase board doesn't surface it contextually.
-
-- **Action:** In `formatPursueShortcut`, after the validation commands for ntlm-hash type credentials that already have `valid_on` entries, append: `secretsdump.py <domain>/<user> -hashes :<hash> @<host-ip>  # NTDS dump if target is DC`. The hint should appear on confirmed credentials, not unvalidated ones. Detect Windows hosts from the host list (platform: windows or common Windows ports in endpoints). Update tests.
-- **Files:** `.pi/extensions/lib/operator-shortcuts.ts`, `tests/node/operator-shortcuts.test.mjs`
-
----
-
-### 38. `intel_scan` is harness-local — scanning through a pivot is undocumented and silently fails
-
-`intel_scan` runs nmap from the harness container. If Ghost pivoted through web01 and calls `intel_scan("10.10.20.0/24")`, the harness can't reach that segment — zero results, no error, no explanation. Time wasted before realising the problem.
-
-The better fix is a `via_socks_port` parameter: when set, prepend `proxychains` to the nmap spawn with the configured proxy port. Minimum fix: add it to the tool description and `promptGuidelines`.
-
-- **Action (better):** Add `via_socks_port: Type.Optional(Type.Number())` to `intel_scan` parameters. When set, check that `proxychains4` is available, then prepend `proxychains` to the spawn args and document the requirement for a live SOCKS tunnel on that port. Update tests.
-- **Action (minimum):** Add a `promptGuidelines` entry: "intel_scan runs from the harness — for internal segments only reachable through a pivot, first run `remote_tunnel(type='dynamic', via='root@web01', local_port=1080)`, then use `proxychains nmap` manually from the harness shell. intel_scan cannot currently route through a SOCKS proxy."
-- **Files:** `.pi/extensions/intel-scan.ts`, `tests/node/intel-scan.test.mjs`
-
----
-
-### 40. macOS has no `ssh-keys.sh` gather script
-
-Linux has `gather-playbooks/linux/ssh-keys.sh` — a dedicated sweep of all user home directories for SSH private keys, `authorized_keys`, and `known_hosts`, with per-key fingerprint display. On macOS, `enum-credentials.sh` has four lines in a broader credential script (`cat ~/.ssh/authorized_keys known_hosts`). No per-user sweep, no private key discovery across profiles, no fingerprint output.
-
-macOS developer machines are high-value IR targets precisely because they carry SSH keys — GitHub deploy keys, bastion host keys, corporate jump host keys, personal AWS CLI key pairs. Ghost lands on a dev machine, runs `enum-credentials.sh`, gets a surface-level glance. The dedicated script with full per-user, per-key coverage is the right tool.
-
-- **Action:** Write `gather-playbooks/macos/ssh-keys.sh`. Mirror `linux/ssh-keys.sh`: sweep all user home directories under `/Users/`, list private key files (`id_rsa`, `id_ed25519`, `*.pem`, `*.key`), show `authorized_keys` per user, display fingerprints with `ssh-keygen -l`, check `known_hosts` for pivot hints. macOS uses `shasum -a 256` not `sha256sum`. Update `gather-playbooks/SKILL.md`, `docs/playbooks.md`, README count.
-- **Files:** `.pi/skills/gather-playbooks/macos/ssh-keys.sh`, `gather-playbooks/SKILL.md`, `docs/playbooks.md`, `README.md`
-
----
-
-### 41. `ir-report` and `/report` are not documented in the runbook
-
-`bin/ir-report` generates a structured incident report. `/report` surfaces the short brief in the TUI. Neither appears anywhere in `docs/runbook.md`. An analyst who doesn't know to look for it won't find it — and the post-incident report step will be done manually from `intel_summary()` output, which is what `ir-report` was built to replace.
-
-- **Action:** Add a "Reporting" section to `docs/runbook.md` (near the end, after Verify phase) covering: `/report` for in-session brief, `ir-report` for full markdown export, `ir-report --format json` for SIEM/programmatic use, `ir-report --output report.md` for writing to file. Add `/report` to the tool quick-reference table.
-- **Files:** `docs/runbook.md`
-
----
-
-## 🟢 P3 — Engineering housekeeping
+## 🟠 P1 — Fix before the next incident image is trusted
 
 ### 14. Pin Docker builds — supply chain risk
 
 NetExec installs from GitHub HEAD. pi installs from npm latest. A CI build can silently change behavior. For a security tool, non-reproducible builds are a credibility problem.
 
-**Action:** Pin NetExec to a specific commit/tag. Pin pi to a specific npm version. Pin Node via `.nvmrc` or `node-version` label. Document update cadence. **Files:** `Dockerfile`
+- **Action:** Pin NetExec to a specific commit/tag. Pin pi to a specific npm version. Pin Impacket to a version. Pin Node with `.nvmrc` and a Docker `ARG NODE_MAJOR`/version note matching CI. Document update cadence and a deliberate dependency-bump workflow.
+- **Files:** `Dockerfile`, `.nvmrc`, `.github/workflows/ci.yml`, README or CONTRIBUTING update cadence note
 
 ---
+
+## 🟡 P2 — High operator leverage
+
+### 48. Evidence packaging should move from strategic idea to operator workflow
+
+At incident close, I need to hand off `workspace/intel`, audit logs, session logs, reports, and selected evidence. Today that is manual. Manual packaging means missed files and uncontrolled secret sprawl. This is core IR hygiene, not long-term wishlist.
+
+- **Dependency:** Do after #44. Packaging before secret-output cleanup just formalizes dirty logs into an archive.
+- **Action:** Build `bin/ir-package`: generate `ir-report`, collect intel/logs/evidence into a timestamped tarball, produce a manifest with SHA-256 hashes, and warn if active/unrotated credentials remain. Keep signing optional if no key is configured.
+- **Files:** `bin/ir-package`, `tests/python/test_ir_package.py`, `docs/runbook.md`, `README.md`
+
+---
+
+## 🟢 P3 — Simplify / de-risk maintenance
 
 ### 20. Make nvim config optional in the image
 
-Adds image weight in non-interactive/CI deployments.
+Adds image weight in non-interactive/CI deployments. Low risk and cheap after higher-risk incident workflow fixes.
 
-**Action:** `ARG INCLUDE_NVIM_CONFIG=true`, conditional `COPY`. Keep default as `true`. **Files:** `Dockerfile`, `.config/nvim/**`
+- **Action:** `ARG INCLUDE_NVIM_CONFIG=true`, conditional `COPY`. Keep default as `true`.
+- **Files:** `Dockerfile`, `.config/nvim/**`
 
 ---
 
-### 26. ir-search clipboard bind silently no-ops
+### 52. Consider tmux-backed remote sessions for simpler interaction + capture
 
-`xclip` not in image, requires X11 anyway. `pbcopy` is macOS-only. The `enter`-to-copy bind always fails silently in a headless container.
+Past operator workflow used tmux capture for SSH/telnet. That model is attractive: one terminal owns the real interactive session, the agent sends keys, and capture-pane/pipe-pane becomes the log. It could simplify telnet/network-device handling and let humans attach to the same live session.
 
-**Action:** Write selected line to `workspace/ir-search-hits.txt` (append + timestamp) or drop the bind. **Files:** `bin/ir-search`
+Risks: command-boundary detection is harder than pipe markers, scrollback can truncate evidence, secrets stay in terminal history, concurrent `remote_exec` calls can race, and WinRM/PowerShell remoting should likely stay on the current command-oriented adapter.
+
+- **Dependency:** Do after #44. tmux scrollback/pipe-pane can amplify raw-secret leakage if reveal/default modes are not clear.
+- **Action:** Prototype optional `tmux` backend for SSH/telnet/network-device only: spawn session in named window/pane, `pipe-pane` to `${BRJOTSKEL_LOG_DIR}/remote-sessions`, send commands via `tmux send-keys`, collect output via `capture-pane`, and compare reliability against current marker-based adapter. Keep WinRM/PowerShell on the command adapter.
+- **Files:** `.pi/extensions/remote-session.ts`, `.pi/extensions/lib/protocol-adapters/**`, `Dockerfile` (tmux), `tests/node/**`, `docs/architecture.md`
 
 ---
 
 ## Strategic / longer-term
 
 **Cloud-native IR.** EC2/Azure/GCP SDK-based collection — not just IMDS metadata, but IAM policy enumeration, CloudTrail review, S3 access log analysis, Security Hub findings ingestion. The current cloud credential scripts find the token; they don't investigate what that token can reach.
-
-**Evidence packaging.** A `bin/ir-package` tool that bundles `workspace/intel/`, `logs/`, and selected evidence files into a timestamped, signed archive. Useful for handoffs, legal holds, and post-incident review.
 
 ---
 
@@ -120,7 +94,7 @@ Adds image weight in non-interactive/CI deployments.
 - **Full-platform isolation** — Linux (iptables), Windows (Firewall default-block), macOS (pf). All three platforms now have the complete containment suite. Keep this symmetry.
 - **Intel store lifecycle enforcement** — credentials can't be retrieved post-rotation, lifecycle transitions are validated. This is correct behavior; don't soften it.
 - **Evidence-first pattern** in every containment and eradication script. Non-negotiable.
-- **Native-OS-only playbooks** — no binary uploads to targets. This is the core promise.
+- **Native-OS-only playbooks** — no third-party binary uploads to targets. Temporary script text staging is allowed with cleanup.
 - **Audit logging** — every session, command, and finding is timestamped and logged. The reconstruction capability is a key differentiator.
 - **`intel-snippet`** normalized intel_add generation — reduces schema errors under pressure.
 - **`/scope` → `/map` → `/pursue` loop** — the right situational awareness rhythm. Keep it tight.
@@ -128,6 +102,69 @@ Adds image weight in non-interactive/CI deployments.
 ---
 
 ## Completed (archive)
+
+<details>
+<summary>P2 — #26 resolved</summary>
+
+- ✅ **#26** Replaced the dead headless clipboard bind in `bin/ir-search`. Enter now saves the selected line to `${BRJOTSKEL_LOG_DIR:-logs}/ir-search-hits.txt` (or `BRJOTSKEL_IR_SEARCH_HITS`) with a UTC timestamp and still prints/accepts the selection. Added `--record-hit` helper coverage and updated docs.
+
+</details>
+
+<details>
+<summary>P3 — #50–#51 resolved</summary>
+
+- ✅ **#50** Split operator slash-command runtime, intel snapshot reading, and scope rendering out of `remote-session.ts` into `.pi/extensions/lib/operator-runtime.ts`. `remote-session.ts` dropped from ~1,274 to ~927 lines while preserving behavior. Added Node coverage for intel snapshot and scope rendering.
+- ✅ **#51** Added `bin/clean-local` dry-run cleanup for ignored scratch/cache paths (`temp/`, `.pytest_cache/`, `__pycache__`, `*.pyc`, `.pi/npm/node_modules`, etc.). Logs/workspace are protected unless `--include-case-data --execute` is explicit. Added Python coverage and README/CONTRIBUTING docs.
+
+</details>
+
+<details>
+<summary>P2/P3 — #43, #47, #49 resolved</summary>
+
+- ✅ **#43** Added `bin/check-playbook-inventory`, wired it into `bin/test`, and normalized README/docs/playbook counts to the enforced rule: 101 operator-facing native OS playbooks under core platform directories; helper lookup scripts excluded.
+- ✅ **#47** Normalized target-footprint language: no third-party binaries/tools on targets; native commands only; script text may run inline or be temporarily staged with cleanup.
+- ✅ **#49** Replaced duplicate `docs/analyst-runbook.md` with a stub pointing to canonical `docs/runbook.md`; added docs hygiene coverage to prevent the full duplicate returning.
+
+</details>
+
+<details>
+<summary>P1/P2 — #42, #45, #46 resolved</summary>
+
+- ✅ **#42** Full `ir-report` now accepts both `ts` and `timestamp` timeline fields for investigation start and last activity. Added Python coverage for timestamp-only full markdown reports.
+- ✅ **#46** Remote session logs now resolve under `BRJOTSKEL_LOG_DIR/remote-sessions` when configured, matching `ir-log` and `ir-search`. Added Node coverage for path resolution.
+- ✅ **#45** Added `bin/netexec-to-intel` to parse NetExec success output, map hit IPs to host IDs from `hosts.yaml`, and emit ready-to-paste `intel_update(valid_on=...)` snippets. Added Python coverage and runbook/README references.
+
+</details>
+
+<details>
+<summary>P2 — #41 resolved</summary>
+
+- ✅ **#41** Added Reporting section to `docs/runbook.md` and mirrored `docs/analyst-runbook.md`: `/report` in-session brief, `bin/ir-report` markdown, `--format json`, `--output`, and alternate intel-dir usage. Added `/report` and `bin/ir-report` to the quick-reference table.
+
+</details>
+
+<details>
+<summary>P2 — #38, #40 resolved</summary>
+
+- ✅ **#38** `intel_scan` now supports `via_socks_port` for pivot-only segments. It checks for `proxychains4`, writes a temporary SOCKS config for `127.0.0.1:<port>`, routes nmap through it, records SOCKS provenance in host source metadata, and warns when no hosts answer from a harness-local scan.
+- ✅ **#40** Added `gather-playbooks/macos/ssh-keys.sh`: per-user `/Users` SSH directory sweep, private key metadata + SHA-256 + `ssh-keygen -l` fingerprints, `authorized_keys`, SSH config, known_hosts pivot hints, and system SSH key/config coverage. Documentation counts updated to 97 scripts.
+
+</details>
+
+<details>
+<summary>P2 — #36–#37 resolved</summary>
+
+- ✅ **#36** `/pursue` and `intel_add` credential validation hints now emit SMB, WinRM, and SSH `netexec` commands for password and NTLM hash material. Shared command generator added with coverage.
+- ✅ **#37** `/pursue` now shows confirmed/active credential blast-radius work, and adds contextual `secretsdump.py <domain>/<user> -hashes :<hash> @<host-ip>` hints for NTLM hashes already valid on Windows hosts/DC candidates.
+
+</details>
+
+<details>
+<summary>P1 — #39 resolved</summary>
+
+- ✅ **#39** `intel_scan` timeline entries now include `timestamp: new Date().toISOString()`. Added Node coverage that executes `intel_scan` with a fake harness-local `nmap` and verifies the generated timeline timestamp is non-empty ISO-8601.
+
+</details>
 
 <details>
 <summary>P1 — #33–#35 resolved</summary>

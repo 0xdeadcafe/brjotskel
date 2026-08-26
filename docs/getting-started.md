@@ -131,7 +131,7 @@ Once a credential is marked `rotated`, the intel store blocks retrieval of its s
 
 **Sessions** — every `remote_connect` call opens a named persistent shell session. Multiple sessions can be active simultaneously. All commands and output are logged to `logs/remote-sessions/`.
 
-**Playbooks** — 96 native-OS scripts covering credentials, persistence, network, AD, cloud, and more. The agent reads and runs them inline — nothing is uploaded to the target. See [playbooks.md](playbooks.md) for the full list.
+**Playbooks** — 101 native-OS scripts covering credentials, persistence, network, AD, cloud, and more. The agent reads and runs them inline when possible or stages script text temporarily with cleanup. No third-party binaries land on targets. See [playbooks.md](playbooks.md) for the full list.
 
 **Phase shortcuts** — `/assess`, `/pursue`, `/contain`, `/eradicate`, `/verify` are the fast path. They produce targeted command packs based on the current session state and intel store. Senior analysts can move through an incident entirely via shortcuts; the agent handles the rest.
 
@@ -145,7 +145,7 @@ Once a credential is marked `rotated`, the intel store blocks retrieval of its s
 /brief          — tactical intel brief: status, open leads, recommended next move
 intel_summary() — host/credential/account/pivot counts and status breakdown
 ir-log "note"   — append a manual note to the audit log
-ir-search       — interactive fzf search across all audit and session logs
+ir-search       — interactive fzf search; Enter saves selected hits to logs/ir-search-hits.txt
 ```
 
 ---

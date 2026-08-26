@@ -11,9 +11,10 @@
  *   intel_scan — nmap a target range and populate intel store hosts
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { parseYaml, dumpYaml } from "./lib/simple-yaml.ts";
 import { addIntelRecord, appendTimelineEntry } from "./lib/intel-store-core.ts";
 import { resolveIntelDir } from "./lib/intel-helpers.ts";
@@ -26,12 +27,58 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // Nmap runner
 // ---------------------------------------------------------------------------
 
-function runNmap(target: string, ports: number[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const portArg = ports.length > 0 ? `-p ${ports.join(",")}` : "-p 22,80,443,445,3389,5985,5986,23,8080,8443";
-    const args = ["-Pn", "-sT", "--open", "-oG", "-", ...portArg.split(" "), target];
+function requireProxychains4(): void {
+  const probe = spawnSync("proxychains4", ["-h"], { stdio: "ignore" });
+  if ((probe.error as any)?.code === "ENOENT") {
+    throw new Error("via_socks_port requires proxychains4 in the harness PATH");
+  }
+  if (probe.error) {
+    throw new Error(`Failed to probe proxychains4: ${probe.error.message}`);
+  }
+}
 
-    const proc = spawn("nmap", args, { stdio: ["ignore", "pipe", "pipe"] });
+function proxychainsConfig(port: number): string {
+  return [
+    "strict_chain",
+    "proxy_dns",
+    "tcp_read_time_out 15000",
+    "tcp_connect_time_out 8000",
+    "[ProxyList]",
+    `socks5 127.0.0.1 ${port}`,
+    "",
+  ].join("\n");
+}
+
+function runNmap(target: string, ports: number[], timeoutMs: number, viaSocksPort?: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (viaSocksPort !== undefined) {
+      if (!Number.isInteger(viaSocksPort) || viaSocksPort < 1 || viaSocksPort > 65535) {
+        reject(new Error("via_socks_port must be an integer from 1 to 65535"));
+        return;
+      }
+      try { requireProxychains4(); } catch (err) { reject(err); return; }
+    }
+
+    const portArg = ports.length > 0 ? `-p ${ports.join(",")}` : "-p 22,80,443,445,3389,5985,5986,23,8080,8443";
+    const nmapArgs = ["-Pn", "-sT", "--open", "-oG", "-", ...portArg.split(" "), target];
+
+    let command = "nmap";
+    let args = nmapArgs;
+    let proxyTempDir: string | undefined;
+
+    if (viaSocksPort !== undefined) {
+      proxyTempDir = mkdtempSync(join(tmpdir(), "brjotskel-proxychains-"));
+      const configPath = join(proxyTempDir, "proxychains.conf");
+      writeFileSync(configPath, proxychainsConfig(viaSocksPort), { mode: 0o600 });
+      command = "proxychains4";
+      args = ["-q", "-f", configPath, "nmap", ...nmapArgs];
+    }
+
+    const cleanup = () => {
+      if (proxyTempDir) rmSync(proxyTempDir, { recursive: true, force: true });
+    };
+
+    const proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
 
@@ -40,11 +87,13 @@ function runNmap(target: string, ports: number[], timeoutMs: number): Promise<st
 
     const timer = setTimeout(() => {
       proc.kill();
+      cleanup();
       reject(new Error(`nmap timed out after ${timeoutMs / 1000}s`));
     }, timeoutMs);
 
     proc.on("close", (code) => {
       clearTimeout(timer);
+      cleanup();
       if (code !== 0 && stdout.trim() === "") {
         reject(new Error(`nmap exited ${code}: ${stderr.trim()}`));
       } else {
@@ -54,7 +103,8 @@ function runNmap(target: string, ports: number[], timeoutMs: number): Promise<st
 
     proc.on("error", (err) => {
       clearTimeout(timer);
-      reject(new Error(`Failed to spawn nmap: ${err.message}`));
+      cleanup();
+      reject(new Error(`Failed to spawn ${command}: ${err.message}`));
     });
   });
 }
@@ -89,13 +139,15 @@ export default function intelScanExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "intel_scan",
     label: "Intel Scan",
-    description: "Run an nmap scan from the harness against a target range and auto-populate the intel store with discovered hosts. Each responding host is added with status 'in-scope'. Existing entries are preserved — they are not overwritten.",
+    description: "Run an nmap scan from the harness against a target range and auto-populate the intel store with discovered hosts. Each responding host is added with status 'in-scope'. Existing entries are preserved — they are not overwritten. Set via_socks_port to route through an existing local SOCKS pivot using proxychains4.",
     promptSnippet: "Scan a network range and auto-populate the intel store with discovered hosts",
     promptGuidelines: [
       "Use intel_scan to map a new network segment quickly. It runs nmap from the harness — not on the target.",
       "After scanning, run /assess on each new session to triage discovered hosts.",
       "Default ports cover common IR targets: SSH (22), SMB (445), RDP (3389), WinRM (5985/5986), HTTP(S), telnet.",
       "Provide ports as an array of integers to narrow the scan.",
+      "intel_scan runs from the harness. For pivot-only segments, first create a dynamic SOCKS tunnel with remote_tunnel(type='dynamic', via='user@pivot', local_port=1080), then call intel_scan with via_socks_port=1080.",
+      "via_socks_port requires proxychains4 in the harness PATH and a live SOCKS listener on 127.0.0.1:<port>.",
     ],
     parameters: Type.Object({
       target: Type.String({
@@ -107,6 +159,9 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       timeout_seconds: Type.Optional(Type.Number({
         description: "nmap scan timeout in seconds (default: 120)",
       })),
+      via_socks_port: Type.Optional(Type.Number({
+        description: "Route nmap through proxychains4 using a live local SOCKS tunnel on 127.0.0.1:<port> (for pivot-only segments)",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -116,7 +171,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       // Run the scan
       let nmapOutput: string;
       try {
-        nmapOutput = await runNmap(params.target, ports, timeoutMs);
+        nmapOutput = await runNmap(params.target, ports, timeoutMs, params.via_socks_port);
       } catch (err: any) {
         throw new Error(`Scan failed: ${err.message}`);
       }
@@ -125,8 +180,13 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       const discovered = parseNmapGreppable(nmapOutput);
       if (discovered.length === 0) {
         return {
-          content: [{ type: "text", text: `Scan complete: no responding hosts found in ${params.target}` }],
-          details: { target: params.target, hosts_found: 0 },
+          content: [{ type: "text", text: [
+            `Scan complete: no responding hosts found in ${params.target}`,
+            params.via_socks_port
+              ? `Scan routed through SOCKS 127.0.0.1:${params.via_socks_port}; verify the tunnel and proxy reachability if this segment should answer.`
+              : "intel_scan ran from the harness. If this is a pivot-only segment, create a dynamic SOCKS tunnel and rerun with via_socks_port.",
+          ].join("\n") }],
+          details: { target: params.target, hosts_found: 0, via_socks_port: params.via_socks_port },
         };
       }
 
@@ -152,7 +212,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
           endpoints: h.openPorts.map(p => `${p.proto === "tcp" ? "tcp" : p.proto}://${h.ip}:${p.port}`),
           notes: `Discovered by intel_scan: open ports ${portSummary}`,
           source: {
-            method: `nmap scan (intel_scan)`,
+            method: params.via_socks_port ? `nmap scan (intel_scan via SOCKS 127.0.0.1:${params.via_socks_port})` : `nmap scan (intel_scan)`,
             path: params.target,
           },
         };
@@ -172,6 +232,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       let timelineStore = readYamlFile(timelineFile);
       for (const id of added) {
         timelineStore = appendTimelineEntry(timelineStore, {
+          timestamp: new Date().toISOString(),
           type: "host",
           action: "discovered",
           target: id,
@@ -183,6 +244,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       const lines = [
         `Scan complete: ${params.target}`,
         `  Responding hosts: ${discovered.length}`,
+        ...(params.via_socks_port ? [`  Via SOCKS: 127.0.0.1:${params.via_socks_port}`] : []),
         `  Added to intel store: ${added.length}`,
         ...(skipped.length > 0 ? [`  Skipped (already recorded): ${skipped.length}`] : []),
         "",
@@ -205,6 +267,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
           added: added.length,
           skipped: skipped.length,
           host_ids: added,
+          via_socks_port: params.via_socks_port,
         },
       };
     },

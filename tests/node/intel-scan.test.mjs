@@ -1,7 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { parseNmapGreppable } from '../../.pi/extensions/lib/intel-scan-core.ts';
+import { parseYaml } from '../../.pi/extensions/lib/simple-yaml.ts';
+
+const stubModules = new Map([
+  ['typebox', `
+    const schema = (type, options = {}) => ({ type, ...options });
+    export const Type = {
+      Object: (properties = {}, options = {}) => ({ type: 'object', properties, ...options }),
+      String: (options = {}) => schema('string', options),
+      Number: (options = {}) => schema('number', options),
+      Array: (items = {}, options = {}) => ({ type: 'array', items, ...options }),
+      Optional: (inner) => ({ ...inner, optional: true }),
+    };
+  `],
+]);
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (stubModules.has(specifier)) {
+      return {
+        shortCircuit: true,
+        url: `data:text/javascript,${encodeURIComponent(stubModules.get(specifier))}`,
+      };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+function createMockPi() {
+  const tools = [];
+  return {
+    tools,
+    registerTool(tool) { tools.push(tool); },
+  };
+}
+
+async function loadIntelScanExtension() {
+  const mod = await import(`../../.pi/extensions/intel-scan.ts?test=${Date.now()}-${Math.random()}`);
+  return mod.default;
+}
 
 // Sample greppable nmap output fixtures
 const LINUX_SSH_ONLY = `
@@ -122,4 +165,114 @@ test('skips closed/filtered port lines', () => {
   const hosts = parseNmapGreppable(out);
   assert.equal(hosts[0].openPorts.length, 1);
   assert.equal(hosts[0].openPorts[0].port, 22);
+});
+
+test('intel_scan timeline entries include a non-empty timestamp', async () => {
+  const pi = createMockPi();
+  (await loadIntelScanExtension())(pi);
+  const intelScan = pi.tools.find(t => t.name === 'intel_scan');
+  assert.ok(intelScan);
+  assert.ok(intelScan.parameters.properties.via_socks_port);
+
+  const intelDir = mkdtempSync(join(tmpdir(), 'brjotskel-intel-scan-intel-'));
+  const binDir = mkdtempSync(join(tmpdir(), 'brjotskel-intel-scan-bin-'));
+  const previousIntelDir = process.env.BRJOTSKEL_INTEL_DIR;
+  const previousPath = process.env.PATH;
+
+  const fakeNmapPath = join(binDir, 'nmap');
+  writeFileSync(fakeNmapPath, `#!/usr/bin/env bash
+cat <<'EOF'
+${LINUX_SSH_ONLY}
+EOF
+`);
+  chmodSync(fakeNmapPath, 0o700);
+
+  process.env.BRJOTSKEL_INTEL_DIR = intelDir;
+  process.env.PATH = `${binDir}${delimiter}${previousPath || ''}`;
+
+  try {
+    await intelScan.execute('scan-1', {
+      target: '10.10.10.5',
+      ports: [22],
+      timeout_seconds: 5,
+    });
+
+    const timelineDoc = parseYaml(readFileSync(join(intelDir, 'timeline.yaml'), 'utf8'));
+    const entry = timelineDoc.timeline.find(e => e.target === 'host-10-10-10-5');
+    assert.ok(entry, 'missing intel_scan timeline entry');
+    assert.equal(typeof entry.timestamp, 'string');
+    assert.match(entry.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  } finally {
+    if (previousIntelDir === undefined) delete process.env.BRJOTSKEL_INTEL_DIR;
+    else process.env.BRJOTSKEL_INTEL_DIR = previousIntelDir;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(intelDir, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test('intel_scan routes through proxychains4 when via_socks_port is set', async () => {
+  const pi = createMockPi();
+  (await loadIntelScanExtension())(pi);
+  const intelScan = pi.tools.find(t => t.name === 'intel_scan');
+  assert.ok(intelScan);
+
+  const intelDir = mkdtempSync(join(tmpdir(), 'brjotskel-intel-scan-intel-'));
+  const binDir = mkdtempSync(join(tmpdir(), 'brjotskel-intel-scan-bin-'));
+  const previousIntelDir = process.env.BRJOTSKEL_INTEL_DIR;
+  const previousPath = process.env.PATH;
+  const previousProxyLog = process.env.BRJOTSKEL_PROXYCHAINS_LOG;
+  const previousProxyConfLog = process.env.BRJOTSKEL_PROXYCHAINS_CONF_LOG;
+  const proxyLog = join(binDir, 'proxychains-args.log');
+  const proxyConfLog = join(binDir, 'proxychains.conf.copy');
+
+  const fakeProxychainsPath = join(binDir, 'proxychains4');
+  writeFileSync(fakeProxychainsPath, `#!/usr/bin/env bash
+printf '%s\n' "$*" > "$BRJOTSKEL_PROXYCHAINS_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-f" ]; then
+    shift
+    cp "$1" "$BRJOTSKEL_PROXYCHAINS_CONF_LOG"
+  fi
+  shift || break
+done
+cat <<'EOF'
+${LINUX_SSH_ONLY}
+EOF
+`);
+  chmodSync(fakeProxychainsPath, 0o700);
+
+  process.env.BRJOTSKEL_INTEL_DIR = intelDir;
+  process.env.PATH = `${binDir}${delimiter}${previousPath || ''}`;
+  process.env.BRJOTSKEL_PROXYCHAINS_LOG = proxyLog;
+  process.env.BRJOTSKEL_PROXYCHAINS_CONF_LOG = proxyConfLog;
+
+  try {
+    const result = await intelScan.execute('scan-socks', {
+      target: '10.10.20.0/24',
+      ports: [22, 445],
+      timeout_seconds: 5,
+      via_socks_port: 1080,
+    });
+
+    assert.match(result.content[0].text, /Via SOCKS: 127\.0\.0\.1:1080/);
+    assert.equal(result.details.via_socks_port, 1080);
+    assert.match(readFileSync(proxyLog, 'utf8'), /-q -f .*proxychains\.conf nmap -Pn -sT --open -oG - -p 22,445 10\.10\.20\.0\/24/);
+    assert.match(readFileSync(proxyConfLog, 'utf8'), /socks5 127\.0\.0\.1 1080/);
+
+    const hostsDoc = parseYaml(readFileSync(join(intelDir, 'hosts.yaml'), 'utf8'));
+    assert.equal(hostsDoc.hosts['host-10-10-10-5'].source.method, 'nmap scan (intel_scan via SOCKS 127.0.0.1:1080)');
+  } finally {
+    if (previousIntelDir === undefined) delete process.env.BRJOTSKEL_INTEL_DIR;
+    else process.env.BRJOTSKEL_INTEL_DIR = previousIntelDir;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousProxyLog === undefined) delete process.env.BRJOTSKEL_PROXYCHAINS_LOG;
+    else process.env.BRJOTSKEL_PROXYCHAINS_LOG = previousProxyLog;
+    if (previousProxyConfLog === undefined) delete process.env.BRJOTSKEL_PROXYCHAINS_CONF_LOG;
+    else process.env.BRJOTSKEL_PROXYCHAINS_CONF_LOG = previousProxyConfLog;
+    rmSync(intelDir, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
 });

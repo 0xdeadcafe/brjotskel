@@ -143,12 +143,22 @@ test('intel extension refuses duplicate IDs and logs credential access accuratel
   process.env.BRJOTSKEL_INTEL_DIR = intelDir;
 
   try {
-    await intelAdd.execute('add-1', {
+    await intelAdd.execute('add-host', {
+      category: 'host',
+      id: 'web01',
+      data: 'ip: "10.10.10.5"\nplatform: "linux"\nstatus: "in-scope"\nsource:\n  method: "test fixture"\n',
+      summary: 'known host fixture',
+    });
+
+    const addResult = await intelAdd.execute('add-1', {
       category: 'credential',
       id: 'svc-pass',
       data: 'type: "password"\nusername: "svc"\nsecret: "1234"\nstatus: "active"\nsource:\n  host: "web01"\n  method: "test fixture"\n',
       summary: 'active credential',
     });
+    assert.match(addResult.content[0].text, /netexec smb 10\.10\.10\.5 -u svc -p/);
+    assert.match(addResult.content[0].text, /netexec winrm 10\.10\.10\.5 -u svc -p/);
+    assert.match(addResult.content[0].text, /netexec ssh 10\.10\.10\.5 -u svc -p/);
 
     await assert.rejects(
       () => intelAdd.execute('add-dup', {

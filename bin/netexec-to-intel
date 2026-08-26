@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""netexec-to-intel — Convert NetExec success output into intel_update snippets.
+
+Usage:
+  netexec smb 10.10.10.0/24 -u admin -H <hash> --no-bruteforce | \
+    bin/netexec-to-intel --cred-id admin-ntlm
+
+Reads NetExec output from stdin or --input, maps hit IPs to host IDs from
+workspace/intel/hosts.yaml, and emits a ready-to-paste intel_update call.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Iterable
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("Error: pyyaml is required. Install with: pip3 install pyyaml")
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+IPISH_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
+def parse_netexec_successes(text: str) -> list[dict[str, str]]:
+    """Return unique NetExec success hits: service, ip, raw line."""
+    hits: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for raw in text.splitlines():
+        line = strip_ansi(raw).strip()
+        if "[+]" not in line:
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        service = parts[0].lower()
+        ip = parts[1]
+        if service not in {"smb", "winrm", "ssh", "mssql", "ldap", "rdp", "ftp"}:
+            continue
+        if not IPISH_RE.match(ip):
+            continue
+        key = (service, ip)
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append({"service": service, "ip": ip, "line": line})
+
+    return hits
+
+
+def load_host_map(intel_dir: Path) -> dict[str, str]:
+    hosts_file = intel_dir / "hosts.yaml"
+    if not hosts_file.exists():
+        return {}
+    with hosts_file.open(encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    hosts = doc.get("hosts") or {}
+    if not isinstance(hosts, dict):
+        return {}
+
+    ip_to_id: dict[str, str] = {}
+    for host_id, host in hosts.items():
+        if not isinstance(host, dict):
+            continue
+        ip = host.get("ip")
+        if isinstance(ip, str) and ip:
+            ip_to_id[ip] = str(host_id)
+    return ip_to_id
+
+
+def yaml_block_list(values: Iterable[str]) -> str:
+    return "valid_on:\n" + "".join(f"  - {v}\n" for v in values) + "status: confirmed\n"
+
+
+def emit_update(cred_id: str, hits: list[dict[str, str]], ip_to_id: dict[str, str]) -> str:
+    if not hits:
+        return "# No NetExec success lines found. Expected lines containing '[+]' from smb/winrm/ssh/etc."
+
+    host_ids: list[str] = []
+    seen_hosts: set[str] = set()
+    comments: list[str] = [f"# NetExec validation hits for credential: {cred_id}"]
+
+    for hit in hits:
+        mapped = ip_to_id.get(hit["ip"], hit["ip"])
+        if mapped == hit["ip"]:
+            comments.append(f"# WARNING: {hit['ip']} not found in hosts.yaml; using IP in valid_on and you should add/merge host intel")
+        comments.append(f"# {hit['service']} {hit['ip']} -> {mapped}")
+        if mapped not in seen_hosts:
+            seen_hosts.add(mapped)
+            host_ids.append(mapped)
+
+    fields = yaml_block_list(host_ids).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    summary_hosts = ", ".join(host_ids[:4]) + (f" and {len(host_ids) - 4} more" if len(host_ids) > 4 else "")
+    summary = f"{cred_id} confirmed on {summary_hosts} via NetExec"
+    call = f'intel_update(category="credential", id="{cred_id}", fields="{fields}", summary="{summary}")'
+    return "\n".join(comments + [call])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Convert NetExec success output into intel_update snippets.")
+    parser.add_argument("--cred-id", required=True, help="Credential ID to update")
+    parser.add_argument("--intel-dir", default=os.environ.get("BRJOTSKEL_INTEL_DIR", "workspace/intel"), help="Intel store directory")
+    parser.add_argument("--input", "-i", help="Read NetExec output from file instead of stdin")
+    args = parser.parse_args()
+
+    if args.input:
+        text = Path(args.input).read_text(encoding="utf-8")
+    else:
+        text = sys.stdin.read()
+
+    hits = parse_netexec_successes(text)
+    ip_to_id = load_host_map(Path(args.intel_dir))
+    print(emit_update(args.cred_id, hits, ip_to_id))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

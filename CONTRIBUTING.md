@@ -6,7 +6,7 @@ How to add playbooks, extend the agent, run tests, and keep the tool sharp.
 
 ## Ground rules
 
-- **Native OS commands only on target hosts.** No curl downloads, no pip installs, no binary uploads inside playbooks.
+- **Native OS commands only on target hosts.** No curl downloads, no pip installs, no third-party binary uploads inside playbooks. Script text may be staged temporarily only when cleaned up.
 - **Read-only by default.** Playbooks that change host state must say so prominently at the top.
 - **Evidence first.** Any script that destroys volatile state (killing processes, locking accounts) must capture that state first.
 - **Test before pushing.** `bash bin/test` must pass cleanly — syntax checks, unit tests, executable bit policy.
@@ -59,7 +59,7 @@ How to add playbooks, extend the agent, run tests, and keep the tool sharp.
 
 1. Add the script to the relevant `SKILL.md` inventory table in its skill directory
 2. Add it to `docs/playbooks.md`
-3. Update the platform summary table in `README.md` if the count changes
+3. Run `bin/check-playbook-inventory` and update docs if the enforced count changes
 4. Run `bash bin/test` — the smoke check will fail if the shebang is present but `+x` is missing
 
 ---
@@ -96,6 +96,7 @@ Extensions live in `.pi/extensions/`. Pi loads all `.ts` files in that directory
     tunnel-manager.ts      — SSH tunnel spawn + lifecycle
     relay-manager.ts       — relay setup, verification, teardown
     operator-shortcuts.ts  — phase shortcut formatters + prompts
+    operator-runtime.ts    — slash command handlers, intel snapshot, scope rendering
     intel-helpers.ts       — intel schema validation, status enums
     intel-store-core.ts    — intel CRUD, attack graph, timeline filtering
     intel-permissions.ts   — file permission hardening
@@ -130,12 +131,24 @@ bash bin/test
 
 The test suite:
 - Shell, Python, TypeScript, PowerShell syntax checks
+- Playbook inventory drift check
 - Shebang executable bit policy check
 - Banned-pattern checks (stale tool references)
-- **Python unit tests** (`tests/python/`): `intel-snippet` output format, `ir-log` audit entries (text + JSONL)
-- **Node unit tests** (`tests/node/`): extension registration, intel store CRUD and validation, relay helpers, session management, operator shortcuts, YAML round-trip, attack graph, timeline filtering, tunnel manager lifecycle, relay manager orchestration
+- **Python unit tests** (`tests/python/`): `intel-snippet`, `ir-log`, `ir-search`, `ir-report`, `netexec-to-intel`, docs hygiene, local cleanup
+- **Node unit tests** (`tests/node/`): extension registration, intel store CRUD and validation, relay helpers, session management, operator shortcuts/runtime, YAML round-trip, attack graph, timeline filtering, tunnel manager lifecycle, relay manager orchestration
 
-Current counts: **16 Python** | **78 Node** — all must pass before pushing.
+Current counts: **41 Python** | **95 Node** — all must pass before pushing.
+
+---
+
+## Local cleanup
+
+```sh
+bin/clean-local              # dry-run: show ignored scratch/cache targets
+bin/clean-local --execute    # remove temp/, caches, __pycache__, *.pyc
+```
+
+`logs/` and `workspace/` are never touched unless `--include-case-data --execute` is supplied. Treat that as local incident-state destruction.
 
 ---
 
@@ -157,8 +170,8 @@ GitHub Actions runs the full test harness and a Docker smoke build on every push
 | Phase shortcuts: `/land`, `/assess`, `/pursue`, `/contain`, `/eradicate`, `/verify` | ✅ |
 | `/scope`, `/map`, `/brief`, `/incident` agent commands | ✅ |
 | Linux gather playbooks — 19 scripts | ✅ |
-| Windows gather playbooks — 27 scripts | ✅ |
-| macOS gather playbooks — 10 scripts | ✅ |
+| Windows gather playbooks — 28 scripts | ✅ |
+| macOS gather playbooks — 11 scripts | ✅ |
 | Network device CLI references — Cisco IOS/NX-OS, Juniper JunOS | ✅ |
 | Host IR playbooks — Linux (2), Windows (8), macOS (2) | ✅ |
 | Containment playbooks — Linux/Windows/macOS | ✅ |
@@ -168,8 +181,10 @@ GitHub Actions runs the full test harness and a Docker smoke build on every push
 | Cloud credential enumeration — EC2/Azure/GCP IMDS | ✅ |
 | Binary integrity verification — Linux, Windows | ✅ |
 | Operator audit logging — text and JSONL | ✅ |
-| `ir-search` — fzf-based interactive log search | ✅ |
+| `ir-search` — fzf-based interactive log search with saved selected hits | ✅ |
 | `intel-snippet` — normalized `intel_add(...)` generation | ✅ |
+| `netexec-to-intel` — NetExec success output to `intel_update(valid_on=...)` | ✅ |
+| `clean-local` — dry-run local scratch/cache cleanup | ✅ |
 | Persona auto-surfaces live intel state in every agent turn | ✅ |
 
 For the open backlog, see [TODO.md](TODO.md).

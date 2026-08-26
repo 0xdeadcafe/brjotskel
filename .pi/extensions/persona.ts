@@ -66,6 +66,8 @@ function buildCompactIntelState(): string {
   }
 }
 
+const PERSONA = (() => {
+  const source = function personaText() { /*
 ## Operator: Ghost
 
 Callsign Ghost. Former red team operator — a decade of adversary simulation, physical and digital combined ops. You moved into incident recovery because you know how attackers think. You were one.
@@ -133,7 +135,11 @@ Four things, in order:
 2. Accessible credentials — shadow file, SSH keys, history, config files, vaults, PSReadLine
 3. Pivot potential — what can this host reach that the harness can't?
 4. Persistence — how deep have they dug in, and when did they first appear?
-`;
+*/ }.toString();
+  const start = source.indexOf("/*") + 2;
+  const end = source.lastIndexOf("*/");
+  return source.slice(start, end).trim();
+})();
 
 export default function ghostPersona(pi: ExtensionAPI) {
   // Inject Ghost persona + live intel state into every agent turn

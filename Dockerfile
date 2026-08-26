@@ -75,9 +75,12 @@ RUN npm install -g @earendil-works/pi-coding-agent
 WORKDIR /opt/brjotskel
 
 COPY bin/ /opt/brjotskel/bin/
-RUN chmod +x /opt/brjotskel/bin/ir-log /opt/brjotskel/bin/intel-snippet /opt/brjotskel/bin/ir-search /opt/brjotskel/bin/ir-report /opt/brjotskel/bin/test /opt/brjotskel/bin/smoke-check \
+RUN chmod +x /opt/brjotskel/bin/ir-log /opt/brjotskel/bin/intel-snippet /opt/brjotskel/bin/netexec-to-intel /opt/brjotskel/bin/check-playbook-inventory /opt/brjotskel/bin/clean-local /opt/brjotskel/bin/ir-search /opt/brjotskel/bin/ir-report /opt/brjotskel/bin/test /opt/brjotskel/bin/smoke-check \
     && ln -sf /opt/brjotskel/bin/ir-log /usr/local/bin/ir-log \
     && ln -sf /opt/brjotskel/bin/intel-snippet /usr/local/bin/intel-snippet \
+    && ln -sf /opt/brjotskel/bin/netexec-to-intel /usr/local/bin/netexec-to-intel \
+    && ln -sf /opt/brjotskel/bin/check-playbook-inventory /usr/local/bin/check-playbook-inventory \
+    && ln -sf /opt/brjotskel/bin/clean-local /usr/local/bin/clean-local \
     && ln -sf /opt/brjotskel/bin/ir-search /usr/local/bin/ir-search \
     && ln -sf /opt/brjotskel/bin/ir-report /usr/local/bin/ir-report
 

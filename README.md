@@ -8,7 +8,7 @@
 
 You get a call. A host is compromised. There's no EDR, the SIEM has gaps, and the attacker may still be active. You have SSH to one box and an unknown blast radius.
 
-brjotskel gives you a containerized AI agent, 96 native-OS playbook scripts, and a structured intel store to land, assess, follow the credential trail, and eradicate completely — without dropping a single binary on a target host.
+brjotskel gives you a containerized AI agent, 101 native-OS playbook scripts, and a structured intel store to land, assess, follow the credential trail, and eradicate completely — without dropping third-party binaries or tools on a target host.
 
 ---
 
@@ -18,7 +18,7 @@ Most IR tooling assumes either (a) an agent is already deployed, or (b) you have
 
 | Problem | How brjotskel addresses it |
 |---------|---------------------------|
-| No EDR on compromised hosts | 96 native-OS scripts — bash, PowerShell, sh — that collect everything without uploading anything |
+| No EDR on compromised hosts | 101 native-OS scripts — bash, PowerShell, sh — run inline or staged temporarily, using target-native commands only |
 | Unknown blast radius | Structured intel store tracks hosts, credentials, and pivot paths; credential validation loop shows where each credential works |
 | Attacker still active | Phase shortcuts (`/assess`, `/pursue`, `/contain`) let senior analysts move fast without ceremony |
 | Multi-hop network topology | SSH tunnels, SOCKS proxies, and native TCP relays through any session type |
@@ -70,7 +70,13 @@ The AI agent doesn't just run commands — it reasons through the investigation.
 3. Records every finding as **structured intel** — hosts, credentials, pivot paths, accounts — in a queryable YAML store
 4. Follows the **credential trail**: recover → record → validate against other hosts → pivot
 
-Target hosts see only native OS commands. All third-party tools (`impacket`, `netexec`, `nmap`) run from the harness container.
+Target hosts see only native OS commands. Playbooks can be pasted inline or temporarily staged with cleanup; all third-party tools (`impacket`, `netexec`, `nmap`) run from the harness container.
+
+### Target footprint
+
+- **Allowed on targets:** native shell/PowerShell commands, OS administration tools already present, and temporary script text staging when inline execution is impractical.
+- **Not allowed by default:** third-party binaries, package installs, downloaded tools, or persistent agents on targets.
+- **Operator duty:** clean staged scripts, log every action, and record recovered intel with provenance.
 
 ---
 
@@ -108,13 +114,13 @@ Append `--prompt` to stage an editable agent prompt, e.g. `/assess web01 --promp
 
 ## Playbooks
 
-96 native-OS scripts — nothing is uploaded to target hosts. All use only commands already present on the target OS.
+101 native-OS scripts. They use commands already present on the target OS; run them inline when possible or temporarily stage script text with cleanup when needed.
 
 | Category | Linux | Windows | macOS | Network devices |
 |----------|------:|--------:|------:|----------------:|
-| Gather | 19 | 28 | 10 | 3 |
+| Gather | 19 | 28 | 11 | 3 |
 | Host IR | 2 | 8 | 2 | — |
-| Containment | 4 | 3 | 3 | — |
+| Containment | 4 | 4 | 4 | — |
 | Eradication | 4 | 4 | 5 | — |
 | Privilege escalation | 1 | 1 | 1 | — |
 
@@ -164,9 +170,12 @@ intel_timeline(action="view")
 | `ntlmrelayx.py` | NTLM relay |
 | `netexec` | Credential validation at scale — SMB, WinRM, SSH, MSSQL |
 | `ir-log` | Audit logger — timestamped entries to `logs/audit-YYYYMMDD.log` |
-| `ir-search` | `fzf`-based interactive search across all audit and session logs |
+| `ir-search` | `fzf`-based search across audit/session logs; Enter saves selected hits to `logs/ir-search-hits.txt` |
 | `ir-report` | Incident report generator — renders intel store to markdown or JSON |
 | `intel-snippet` | Generate normalized `intel_add(...)` payloads from gather output |
+| `netexec-to-intel` | Convert NetExec success output into `intel_update(valid_on=...)` snippets |
+| `check-playbook-inventory` | CI guard for README/docs playbook count drift |
+| `clean-local` | Dry-run cleanup for ignored scratch/cache state; preserves logs/workspace by default |
 | `curl`, `jq`, `git`, `python3`, `ripgrep`, `fd`, `neovim` | General support |
 
 ---
@@ -176,8 +185,8 @@ intel_timeline(action="view")
 | Platform | Access | Gather | IR | Privesc | Pivoting |
 |----------|--------|-------:|---:|---------|---------|
 | Linux | SSH | 19 | 2 | ✓ | SSH tunnels, socat/ncat/nc relays |
-| Windows | WinRM, SSH | 27 | 8 | ✓ | netsh portproxy, ncat relays |
-| macOS | SSH | 10 | 2 | ✓ | SSH tunnels, socat/ncat relays |
+| Windows | WinRM, SSH | 28 | 8 | ✓ | netsh portproxy, ncat relays |
+| macOS | SSH | 11 | 2 | ✓ | SSH tunnels, socat/ncat relays |
 | Network devices | SSH, telnet | 3 | — | — | — |
 
 ---
@@ -188,7 +197,7 @@ intel_timeline(action="view")
 .pi/extensions/     Agent extensions: sessions, tunnels, relays, intel store, phase shortcuts
 .pi/skills/         All playbooks and reference docs (per-platform subdirectories)
 .pi/prompts/        /brief and /incident prompt templates
-bin/                ir-log, ir-search, intel-snippet, smoke-check, test
+bin/                ir-log, ir-search, ir-report, intel-snippet, netexec-to-intel, check-playbook-inventory, clean-local, smoke-check, test
 docs/               Guides, runbooks, and reference documentation
 logs/               Audit and per-session command logs (mount to persist)
 workspace/          Intel store YAML and operator scratch space (mount to persist)
@@ -203,7 +212,7 @@ CONTRIBUTING.md     How to add playbooks, extend the agent, and run tests
 
 brjotskel operates under an explicit rules of engagement framework. See [CONSTITUTION.md](CONSTITUTION.md).
 
-**Short version:** only operate within the authorized incident scope, collect evidence before taking destructive action, log every pivot and credential harvest, never drop tools on target hosts.
+**Short version:** only operate within the authorized incident scope, collect evidence before taking destructive action, log every pivot and credential harvest, never drop third-party tools or binaries on target hosts.
 
 ---
 
@@ -223,10 +232,21 @@ brjotskel operates under an explicit rules of engagement framework. See [CONSTIT
 
 ---
 
+## Local cleanup
+
+```sh
+bin/clean-local              # dry-run: temp/, caches, __pycache__, *.pyc
+bin/clean-local --execute    # delete selected generated/scratch paths
+```
+
+`logs/` and `workspace/` are protected by default. Use `--include-case-data --execute` only when intentionally clearing local incident state.
+
+---
+
 ## CI
 
 ```yaml
-- run: bash bin/test        # smoke check + 29 Python unit tests + 88 Node tests
+- run: bash bin/test        # smoke check + inventory check + 41 Python unit tests + 95 Node tests
 - run: docker build -t brjotskel:ci .
 ```
 

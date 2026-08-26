@@ -79,6 +79,22 @@ class TestIrReportBasic(unittest.TestCase):
             self.assertIn("web01", out)
             self.assertIn("deploy-key", out)
 
+    def test_full_markdown_uses_timestamp_timeline_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(
+                tmp,
+                timeline=[
+                    {"timestamp": "2026-08-25T10:00:00Z", "type": "host", "action": "discovered",
+                     "target": "web01", "summary": "Initial host"},
+                    {"timestamp": "2026-08-25T11:30:00Z", "type": "credential", "action": "confirmed",
+                     "target": "admin-ntlm", "summary": "Hash confirmed"},
+                ],
+            )
+            result = run_report(intel_dir=d)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("| Investigation start | 2026-08-25T10:00:00Z |", result.stdout)
+            self.assertIn("| Last activity | 2026-08-25T11:30:00Z |", result.stdout)
+
     def test_rotation_warning_for_active_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = make_intel_dir(

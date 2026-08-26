@@ -115,6 +115,10 @@ export function getLocalHostname(): string {
   return process.env.HOSTNAME || process.env.COMPUTERNAME || "unknown-host";
 }
 
+export function resolveRemoteSessionLogDir(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.BRJOTSKEL_LOG_DIR || join(cwd, "logs"), "remote-sessions");
+}
+
 export function getLogPath(logDir: string, sessionName: string): string {
   try { mkdirSync(logDir, { recursive: true }); } catch { /* ignore */ }
   const ts = new Date().toISOString().slice(0, 10);

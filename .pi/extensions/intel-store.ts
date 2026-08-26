@@ -26,6 +26,7 @@ import { normalizeIntelEntry, validateIntelEntry, validateIntelStatusTransition,
 import { ensurePrivateDir, ensurePrivateFile, hardenExistingPrivateFiles } from "./lib/intel-permissions.ts";
 import { parseYaml as parseYamlDocument, dumpYaml } from "./lib/simple-yaml.ts";
 import { getFileMap, getCollectionKeyMap, addIntelRecord, updateIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary, buildIntelMap, filterTimeline, isInactiveCredentialStatus, timelineActionForIntelUpdate } from "./lib/intel-store-core.ts";
+import { credValidationCmds } from "./lib/operator-shortcuts.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -158,26 +159,8 @@ export default function (pi: ExtensionAPI) {
             const username = cred.username || "?";
             const ipList = hostIps.slice(0, 4).join(",");
             const ipNote = hostIps.length > 4 ? ` (and ${hostIps.length - 4} more)` : "";
-            let cmd = "";
-            switch (cred.type) {
-              case "ntlm-hash":
-                cmd = `netexec smb ${ipList} -u ${username} -H <hash from intel_get_cred(id="${params.id}")> --no-bruteforce`;
-                break;
-              case "password":
-                cmd = `netexec smb ${ipList} -u ${username} -p '<password from intel_get_cred(id="${params.id}")>' --no-bruteforce`;
-                break;
-              case "ssh-key":
-              case "private-key":
-                cmd = `netexec ssh ${ipList} -u ${username} --key-file <key_file from intel_get_cred(id="${params.id}")>`;
-                break;
-              case "kerberos-tgt":
-              case "kerberos-tgs":
-                cmd = `netexec smb ${ipList} -u ${username} --use-kcache  # set KRB5CCNAME first`;
-                break;
-              default:
-                cmd = `netexec smb ${ipList} -u ${username} -p '<secret from intel_get_cred(id="${params.id}")>'`;
-            }
-            validationHint = `\n\n💡 Validate against ${hostIps.length} known host(s)${ipNote}:\n  ${cmd}`;
+            const cmds = credValidationCmds(cred.type, username, params.id, ipList, cred.key_file);
+            validationHint = `\n\n💡 Validate against ${hostIps.length} known host(s)${ipNote}:\n  ${cmds.join("\n  ")}`;
           }
         } catch {
           // hint is best-effort — never fail the add

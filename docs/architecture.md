@@ -64,13 +64,16 @@ A Debian bookworm-slim image. No daemons. `pi` launches by default; `--entrypoin
 | `netexec` | Credential validation at scale — SMB, WinRM, SSH, MSSQL |
 | `ir-log` | Appends timestamped audit entries to `logs/audit-YYYYMMDD.log` |
 | `intel-snippet` | Generates normalized `intel_add(...)` payloads from gather output |
+| `netexec-to-intel` | Converts NetExec success output into `intel_update(valid_on=...)` snippets |
+| `check-playbook-inventory` | CI guard for README/docs playbook count drift |
+| `clean-local` | Dry-run cleanup for ignored scratch/cache state |
 | `curl`, `jq`, `git`, `python3`, `ripgrep`, `fd`, `neovim` | Support tools |
 
 ## Agent layer
 
-`pi` is the AI agent. Two TypeScript extensions add IR-specific tools to its context, loaded automatically from `.pi/extensions/`.
+`pi` is the AI agent. TypeScript extensions add IR-specific tools and persona context, loaded automatically from `.pi/extensions/`.
 
-### remote-session.ts — 9 tools + 6 phase commands
+### remote-session.ts — 9 tools; operator-runtime.ts — slash commands
 
 **Remote access tools:**
 
@@ -84,7 +87,7 @@ A Debian bookworm-slim image. No daemons. `pi` launches by default; `--entrypoin
 | `remote_tunnel` / `remote_tunnel_close` | SSH local, remote, or dynamic SOCKS tunnels. Supports `identity=`, `password=`, `proxy_jump=`. |
 | `remote_relay` / `remote_relay_close` | TCP relay on an existing session using socat, ncat, nc, or netsh portproxy. |
 
-**Phase commands** (registered as pi slash commands):
+**Phase commands** (registered by `operator-runtime.ts` as pi slash commands):
 
 | Command | Produces |
 |---------|---------|
@@ -97,7 +100,7 @@ A Debian bookworm-slim image. No daemons. `pi` launches by default; `--entrypoin
 
 Append `--prompt` to stage an editable agent prompt instead of displaying inline.
 
-Every `remote_exec` call is logged to `logs/remote-sessions/` with session name, timestamp, command, and truncated output.
+Every `remote_exec` call is logged to `${BRJOTSKEL_LOG_DIR:-logs}/remote-sessions/` with session name, timestamp, command, and truncated output.
 
 ### intel-store.ts — 6 tools
 
@@ -147,13 +150,15 @@ Skills are markdown files and scripts that give the agent domain knowledge — w
 
 | Skill | Scripts | Content |
 |-------|---------|---------|
-| `gather-playbooks` | 49 | Collection scripts: Linux × 16, Windows × 24, macOS × 9 |
-| `host-ir-playbooks` | 9 | Host-centric IR: Linux × 1, Windows × 7, macOS × 1 |
+| `gather-playbooks` | 61 | Collection scripts: Linux × 19, Windows × 28, macOS × 11, network-device × 3 |
+| `host-ir-playbooks` | 12 | Host-centric IR: Linux × 2, Windows × 8, macOS × 2 |
+| `containment-playbooks` | 12 | Evidence-first containment: Linux × 4, Windows × 4, macOS × 4 |
+| `eradication-playbooks` | 13 | Persistence removal: Linux × 4, Windows × 4, macOS × 5 |
 | `escalate-playbook` | 3 | Privilege escalation audit: Linux, Windows, macOS |
-| `shell-commands` | 15 ref docs | Native command references: LOLBAS, GTFOBins, persistence, lateral movement, containment |
-| `nmap-playbooks` | 1 script | Network discovery, NSE script selection, safe scan design |
+| `shell-commands` | reference docs | Native command references: LOLBAS, GTFOBins, persistence, lateral movement, containment |
+| `nmap-playbooks` | reference docs | Network discovery, NSE script selection, safe scan design |
 
-All scripts use native OS commands. Nothing is uploaded to targets — the agent reads scripts from the container filesystem and runs them inline via `remote_exec` or stages them with `remote_upload`.
+Target footprint: scripts use native OS commands. The agent reads scripts from the container filesystem and runs them inline via `remote_exec` where possible, or stages script text with `remote_upload` and cleanup when needed. Third-party tools and binaries stay in the harness.
 
 ## Persistence
 
@@ -184,7 +189,7 @@ Rebuild the image only when changing `bin/`, `Dockerfile`, or base OS dependenci
 Run the test harness before pushing:
 
 ```sh
-bash bin/test    # smoke check + 9 Python unit tests + 45 Node tests
+bash bin/test    # smoke check + inventory check + 41 Python unit tests + 95 Node tests
 ```
 
 ## Non-goals

@@ -19,6 +19,12 @@ import {
   relayVerifyOutputConfirmsListening,
   validateRelaySpec,
 } from '../../.pi/extensions/lib/remote-session-core.ts';
+import { resolveRemoteSessionLogDir } from '../../.pi/extensions/lib/remote-types.ts';
+
+test('resolveRemoteSessionLogDir honors BRJOTSKEL_LOG_DIR override', () => {
+  assert.equal(resolveRemoteSessionLogDir('/case/root', {}), '/case/root/logs/remote-sessions');
+  assert.equal(resolveRemoteSessionLogDir('/case/root', { BRJOTSKEL_LOG_DIR: '/evidence/logs' }), '/evidence/logs/remote-sessions');
+});
 
 test('chooseSessionName resolves default, single-session, and explicit selection', () => {
   assert.equal(chooseSessionName(undefined, ['web01'], null), 'web01');

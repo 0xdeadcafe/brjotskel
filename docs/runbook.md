@@ -95,7 +95,13 @@ remote_exec(session="dc01", command="<read and paste windows/first-look.ps1>")
 remote_exec(session="mac01", command="<read and paste macos/first-look.sh>")
 ```
 
-**Running playbooks:** Ask pi directly (`run linux/first-look.sh on web01`) and it will read the script and paste it inline. For larger scripts, use `remote_upload` to stage them to a temp path, run, then remove.
+**Running playbooks:** Ask pi directly (`run linux/first-look.sh on web01`) and it will read the script and paste it inline. For larger scripts, use `remote_upload` to stage script text to a temp path, run, then remove.
+
+### Target footprint
+
+- Target hosts should see native OS commands and short-lived script text only.
+- Third-party tools and binaries (`netexec`, `nmap`, Impacket, downloaded utilities) run from the harness, not the target.
+- If script text is staged, remove it in the same workflow and preserve high-signal output in logs/intel.
 
 ### After first look
 
@@ -109,7 +115,7 @@ remote_exec(session="mac01", command="<read and paste macos/first-look.sh>")
 
 ### Deeper triage
 
-- **Credentials**: `linux/hashdump.sh`, `linux/ssh-keys.sh`, `windows/enum-credentials.ps1`, `windows/psreadline-history.ps1`, `macos/enum-credentials.sh`
+- **Credentials**: `linux/hashdump.sh`, `linux/ssh-keys.sh`, `windows/enum-credentials.ps1`, `windows/psreadline-history.ps1`, `macos/enum-credentials.sh`, `macos/ssh-keys.sh`
 - **Persistence**: `linux/enum-persistence.sh`, `windows/enum-persistence.ps1`, `macos/enum-persistence.sh`
 - **Network context**: `linux/enum-network.sh`, `windows/enum-network.ps1`, `macos/enum-network.sh`
 - **Event history**: `windows/eventlog-hunt.ps1`, `windows/sysmon-hunt.ps1`
@@ -143,6 +149,7 @@ remote_exec(session="dc01", command="<windows/psreadline-history.ps1>")
 
 # macOS — keychain metadata and SSH material
 remote_exec(session="mac01", command="<macos/enum-credentials.sh>")
+remote_exec(session="mac01", command="<macos/ssh-keys.sh>")
 ```
 
 ### Record every find
@@ -182,6 +189,19 @@ ssh -o BatchMode=yes -i workspace/intel/keys/deploy-ed25519 deploy@10.10.20.10 e
 # Via SOCKS proxy
 proxychains netexec smb 10.10.20.0/24 -u admin -H <hash>
 ```
+
+### Convert validation hits to intel
+
+```bash
+# Pipe NetExec output directly into a ready-to-paste intel_update snippet
+netexec smb 10.10.10.0/24 -u Administrator -H <hash> --no-bruteforce | \
+  bin/netexec-to-intel --cred-id admin-ntlm
+
+# Or parse saved output
+bin/netexec-to-intel --cred-id admin-ntlm --input workspace/netexec-admin-ntlm.txt
+```
+
+`netexec-to-intel` maps successful IPs back to host IDs from `workspace/intel/hosts.yaml`, emits `valid_on` updates, and warns on unmapped IPs.
 
 ### Remote credential dump
 
@@ -510,6 +530,45 @@ intel_update(category="host", id="web01",
 
 ---
 
+## Reporting
+
+Use the reporting path once intel is current: hosts scoped, credential blast radius recorded, containment/eradication status updated, and rotations logged.
+
+### In-session brief
+
+```text
+/report
+```
+
+`/report` renders the short incident brief inside pi: host status, dirty/cleared counts, credential rotation list, and the last timeline events. Use it during handoff calls and before containment decisions.
+
+### Full markdown report
+
+```bash
+bin/ir-report
+```
+
+Default output is markdown to stdout. It includes executive summary, host inventory, credential chain, accounts, pivots, and timeline.
+
+### Programmatic / SIEM export
+
+```bash
+bin/ir-report --format json
+```
+
+JSON export preserves the raw intel store shape plus `generated_at`. Use it for SIEM ingestion, case systems, or downstream automation.
+
+### Write report to file
+
+```bash
+bin/ir-report --output report.md
+bin/ir-report --format json --output report.json
+```
+
+Reports read `workspace/intel/` by default. Override with `--intel-dir <dir>` or `BRJOTSKEL_INTEL_DIR` for alternate case workspaces.
+
+---
+
 ## Tool quick reference
 
 | Need | Tool |
@@ -530,6 +589,8 @@ intel_update(category="host", id="web01",
 | List all credentials | `intel_query(query_type="all_credentials")` |
 | Retrieve a password / hash / key path | `intel_get_cred(id="...")` |
 | Overview of all intel | `intel_summary` |
+| In-session incident brief | `/report` |
+| Full incident report | `bin/ir-report [--format json] [--output report.md]` |
 | Record a standalone event | `intel_timeline(action="add", ...)` |
 | Log an operator action | `ir-log <description>` |
 | Scan a network segment | `nmap -Pn -sT --open -p 22,445,3389,5985 <target>` |
@@ -538,6 +599,7 @@ intel_update(category="host", id="web01",
 | Get a shell with a hash | `psexec.py -hashes :<hash> <domain>/<user>@<target>` |
 | Route tools through a pivot | `proxychains <tool>` (after `remote_tunnel(type="dynamic", ...)`) |
 | Generate an intel_add payload | `bin/intel-snippet <subcommand> ...` |
+| Convert NetExec hits to valid_on update | `bin/netexec-to-intel --cred-id <id> --input <file>` |
 
 ---
 
@@ -575,4 +637,4 @@ intel_update(category="host", id="web01",
 | Network scanning | Harness (through SOCKS if needed) |
 | Process or session kill | On target |
 | Firewall rules | On target |
-| Binary execution | Harness only — never drop tools on targets |
+| Third-party binary/tool execution | Harness only — never drop external tools on targets |
