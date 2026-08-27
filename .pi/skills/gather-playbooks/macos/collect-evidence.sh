@@ -2,6 +2,7 @@
 # gather/macos/collect-evidence.sh — Pre-containment volatile evidence collection
 # Requires: root/admin for full coverage
 # Read-only: YES — captures state only, no modifications
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # Footprint: stdout only — no files written on target
 # Purpose: Bag volatile evidence BEFORE any containment action changes it
 #

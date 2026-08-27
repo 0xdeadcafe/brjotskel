@@ -64,6 +64,25 @@ def last_ts(timeline: list) -> str:
 
 
 TERMINAL_STATUSES = {"rotated", "expired", "revoked", "disabled", "inactive", "invalid"}
+SENSITIVE_KEYS = {
+    "secret", "password", "pass", "token", "access_token", "refresh_token",
+    "session_token", "secret_access_key", "private_key", "key_material",
+}
+
+def redact_value(value):
+    """Recursively redact obvious secret fields for shareable report exports."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in SENSITIVE_KEYS or normalized.endswith("_secret") or normalized.endswith("_token"):
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = redact_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    return value
 
 def is_terminal(status: str) -> bool:
     return str(status or "").lower().strip() in TERMINAL_STATUSES
@@ -137,6 +156,9 @@ def build_executive_summary(hosts: dict, credentials: dict, accounts: dict,
     if needs_rotation:
         lines.append(f"⚠️  **{len(needs_rotation)} credential(s) require rotation before this incident is closed.**")
         lines.append("")
+
+    lines.append("⚠️  **Sensitive evidence notice:** `workspace/intel`, remote session transcripts, and `ir-package` archives may contain raw secrets recovered from compromised hosts. Treat as restricted until all touched credentials are rotated/revoked.")
+    lines.append("")
 
     return "\n".join(lines)
 
@@ -389,7 +411,7 @@ def build_markdown_report(intel_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def build_json_report(intel_dir: Path) -> str:
+def build_json_report(intel_dir: Path, redact_secrets: bool = False) -> str:
     hosts_raw       = load_yaml(intel_dir / "hosts.yaml")
     creds_raw       = load_yaml(intel_dir / "credentials.yaml")
     accounts_raw    = load_yaml(intel_dir / "accounts.yaml")
@@ -398,12 +420,20 @@ def build_json_report(intel_dir: Path) -> str:
 
     report = {
         "generated_at": ts_now(),
+        "redacted": redact_secrets,
+        "sensitive_notice": (
+            "workspace/intel, gather logs, and ir-package archives may contain raw secrets; "
+            "use --redact-secrets for shareable JSON exports and rotate/revoke touched credentials."
+        ),
         "hosts":        hosts_raw.get("hosts", {}),
         "credentials":  creds_raw.get("credentials", {}),
         "accounts":     accounts_raw.get("accounts", {}),
         "pivots":       pivots_raw.get("paths", {}),
         "timeline":     timeline_raw.get("timeline", []),
     }
+    if redact_secrets:
+        report = redact_value(report)
+        report["redacted"] = True
     return json.dumps(report, indent=2, default=str)
 
 
@@ -429,6 +459,10 @@ def main() -> None:
         help="Write report to FILE instead of stdout",
     )
     parser.add_argument(
+        "--redact-secrets", action="store_true",
+        help="Redact obvious secret fields in JSON output. Markdown reports already omit raw secret values.",
+    )
+    parser.add_argument(
         "--intel-dir", metavar="DIR",
         default=os.environ.get("BRJOTSKEL_INTEL_DIR", "workspace/intel"),
         help="Path to intel store directory (default: workspace/intel or $BRJOTSKEL_INTEL_DIR)",
@@ -443,7 +477,7 @@ def main() -> None:
     if args.short:
         output = build_short_report(intel_dir)
     elif args.format == "json":
-        output = build_json_report(intel_dir)
+        output = build_json_report(intel_dir, redact_secrets=args.redact_secrets)
     else:
         output = build_markdown_report(intel_dir)
 

@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${1:-}"
+if [[ -z "$image" ]]; then
+  echo "Usage: $0 <docker-image>" >&2
+  exit 2
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker not found; cannot inspect image" >&2
+  exit 1
+fi
+
+docker run -i --rm --entrypoint python3 "$image" - <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, capture_output=True, check=False)
+
+
+def command_output(cmd: list[str]) -> str:
+    proc = run(cmd)
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout
+
+
+def component(name: str, version: str, component_type: str, purl: str | None = None, properties: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "type": component_type,
+        "name": name,
+        "version": version or "unknown",
+    }
+    if purl:
+        item["purl"] = purl
+    if properties:
+        item["properties"] = properties
+    return item
+
+
+def load_manifest() -> dict[str, Any]:
+    path = pathlib.Path("/opt/brjotskel/BUILD-MANIFEST.json")
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"Invalid BUILD-MANIFEST.json: {exc}", file=sys.stderr)
+        return {}
+
+
+def dpkg_components() -> list[dict[str, Any]]:
+    output = command_output(["dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n"])
+    items: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        name, version, arch = parts
+        items.append(component(
+            name,
+            version,
+            "library",
+            f"pkg:deb/debian/{name}@{version}?arch={arch}",
+            [{"name": "ecosystem", "value": "dpkg"}, {"name": "architecture", "value": arch}],
+        ))
+    return items
+
+
+def pip_components() -> list[dict[str, Any]]:
+    output = command_output(["python3", "-m", "pip", "freeze", "--all"])
+    items: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if " @ " in line:
+            name, ref = line.split(" @ ", 1)
+            version = ref
+        elif "==" in line:
+            name, version = line.split("==", 1)
+        else:
+            name, version = line, "unknown"
+        purl = None if version.startswith("git+") else f"pkg:pypi/{name.lower()}@{version}"
+        items.append(component(name, version, "library", purl, [{"name": "ecosystem", "value": "pip"}]))
+    return items
+
+
+def npm_components() -> list[dict[str, Any]]:
+    output = command_output(["npm", "ls", "-g", "--depth=0", "--json"])
+    if not output:
+        return []
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    deps = data.get("dependencies") or {}
+    items: list[dict[str, Any]] = []
+    for name, meta in sorted(deps.items()):
+        version = str(meta.get("version", "unknown")) if isinstance(meta, dict) else "unknown"
+        items.append(component(name, version, "library", f"pkg:npm/{name}@{version}", [{"name": "ecosystem", "value": "npm-global"}]))
+    return items
+
+
+manifest = load_manifest()
+source = manifest.get("source") or {}
+pins = manifest.get("pinned_inputs") or {}
+components = dpkg_components() + pip_components() + npm_components()
+
+bom = {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "serialNumber": "urn:uuid:00000000-0000-0000-0000-000000000000",
+    "version": 1,
+    "metadata": {
+        "component": {
+            "type": "application",
+            "name": "brjotskel",
+            "version": "0.3.0",
+        },
+        "properties": [
+            {"name": "brjotskel.build_ref", "value": str(source.get("BRJOTSKEL_BUILD_REF", "unknown"))},
+            {"name": "brjotskel.build_url", "value": str(source.get("BRJOTSKEL_BUILD_URL", "unknown"))},
+            {"name": "brjotskel.base_image", "value": str(pins.get("BRJOTSKEL_BASE_IMAGE", "unknown"))},
+            {"name": "brjotskel.manifest_path", "value": "/opt/brjotskel/BUILD-MANIFEST.json"},
+        ],
+    },
+    "components": components,
+}
+
+print(json.dumps(bom, indent=2, sort_keys=True))
+PY

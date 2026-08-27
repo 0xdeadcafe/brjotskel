@@ -1,4 +1,8 @@
 #!/bin/sh
+# escalate/macos/local-privesc-audit.sh — Assess macOS privilege-escalation paths
+# Requires: Standard user (some checks benefit from admin)
+# Read-only: YES
+# Purpose: Audit sudo, setuid binaries, writable privileged paths, launchd helpers, and GTFOBins-style candidates.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

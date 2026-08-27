@@ -2,6 +2,7 @@
 # gather/network-device/juniper-junos.sh — Juniper JunOS IR command reference
 # Requires: Read-only or admin login
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # Purpose: Triage a Juniper SRX/MX/EX device for active sessions, routing
 #          topology, security policies, VPN state, and credential exposure.
 #

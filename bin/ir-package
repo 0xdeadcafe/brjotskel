@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""ir-package — Build a sensitive incident handoff archive.
+
+Collects intel, logs, generated report, and selected evidence into a
+permission-restricted tarball with SHA-256 manifests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("Error: pyyaml is required. Install with: pip3 install pyyaml")
+
+
+TERMINAL_CREDENTIAL_STATUSES = {"rotated", "expired", "revoked", "disabled", "inactive", "invalid"}
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def default_intel_dir() -> Path:
+    return Path(os.environ.get("BRJOTSKEL_INTEL_DIR", repo_root() / "workspace" / "intel"))
+
+
+def default_log_dir() -> Path:
+    return Path(os.environ.get("BRJOTSKEL_LOG_DIR", repo_root() / "logs"))
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def active_credentials(intel_dir: Path) -> list[str]:
+    creds = load_yaml(intel_dir / "credentials.yaml").get("credentials") or {}
+    active: list[str] = []
+    for cid, cred in sorted(creds.items()):
+        status = str((cred or {}).get("status") or "").strip().lower()
+        if status not in TERMINAL_CREDENTIAL_STATUSES:
+            username = (cred or {}).get("username") or "unknown"
+            active.append(f"{cid} ({username}, status={status or 'unknown'})")
+    return active
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def copy_tree(src: Path, dst: Path) -> None:
+    def ignore(_dir: str, names: list[str]) -> set[str]:
+        return {n for n in names if n in {".intel.lock", ".DS_Store"} or n.endswith(".tmp")}
+
+    if src.is_dir():
+        shutil.copytree(src, dst, ignore=ignore, symlinks=True)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def unique_dest(base: Path, name: str) -> Path:
+    safe = Path(name).name or "evidence"
+    candidate = base / safe
+    idx = 2
+    while candidate.exists():
+        candidate = base / f"{idx}-{safe}"
+        idx += 1
+    return candidate
+
+
+def build_report(intel_dir: Path, report_path: Path) -> None:
+    script = Path(__file__).resolve().with_name("ir-report")
+    cmd = [sys.executable, str(script), "--intel-dir", str(intel_dir), "--output", str(report_path)]
+    subprocess.run(cmd, check=True, text=True, capture_output=True)
+
+
+def manifest_for(root: Path) -> list[dict]:
+    entries: list[dict] = []
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
+        rel = path.relative_to(root).as_posix()
+        if rel in {"MANIFEST.json", "MANIFEST.sha256"}:
+            continue
+        entries.append({
+            "path": rel,
+            "size": path.stat().st_size,
+            "sha256": sha256_file(path),
+        })
+    return entries
+
+
+def write_manifests(root: Path, entries: list[dict], metadata: dict) -> None:
+    manifest_json = {
+        "metadata": metadata,
+        "files": entries,
+    }
+    (root / "MANIFEST.json").write_text(json.dumps(manifest_json, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    lines = [f"{e['sha256']}  {e['path']}" for e in entries]
+    (root / "MANIFEST.sha256").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def create_tarball(package_root: Path, output_tar: Path) -> None:
+    with tarfile.open(output_tar, "w:gz") as tar:
+        tar.add(package_root, arcname=package_root.name, recursive=True)
+    output_tar.chmod(0o600)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Package brjotskel intel, logs, report, and evidence for sensitive handoff.")
+    p.add_argument("--intel-dir", default=str(default_intel_dir()), help="Intel directory (default: BRJOTSKEL_INTEL_DIR or workspace/intel)")
+    p.add_argument("--log-dir", default=str(default_log_dir()), help="Log directory (default: BRJOTSKEL_LOG_DIR or logs)")
+    p.add_argument("--output-dir", default=str(repo_root() / "workspace" / "packages"), help="Directory for generated tarball")
+    p.add_argument("--case-id", default="brjotskel-case", help="Case identifier used in package name")
+    p.add_argument("--evidence", action="append", default=[], help="Extra evidence file/dir to include; repeatable")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    intel_dir = Path(args.intel_dir).expanduser().resolve()
+    log_dir = Path(args.log_dir).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve()
+
+    if not intel_dir.exists():
+        print(f"Error: intel dir not found: {intel_dir}", file=sys.stderr)
+        return 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.chmod(0o700)
+
+    stamp = utc_stamp()
+    case_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in args.case_id).strip("-") or "brjotskel-case"
+    package_name = f"{case_id}-{stamp}-ir-package"
+    output_tar = output_dir / f"{package_name}.tar.gz"
+
+    active = active_credentials(intel_dir)
+
+    with tempfile.TemporaryDirectory(prefix="brjotskel-ir-package-") as tmp:
+        package_root = Path(tmp) / package_name
+        package_root.mkdir(mode=0o700)
+
+        report_path = package_root / "incident-report.md"
+        try:
+            build_report(intel_dir, report_path)
+        except subprocess.CalledProcessError as e:
+            print(e.stderr or e.stdout or str(e), file=sys.stderr)
+            return e.returncode or 1
+
+        copy_tree(intel_dir, package_root / "intel")
+        if log_dir.exists():
+            copy_tree(log_dir, package_root / "logs")
+        else:
+            (package_root / "logs-MISSING.txt").write_text(f"Log directory not found: {log_dir}\n", encoding="utf-8")
+
+        evidence_root = package_root / "evidence"
+        evidence_root.mkdir()
+        for raw in args.evidence:
+            src = Path(raw).expanduser().resolve()
+            if not src.exists():
+                print(f"Error: evidence path not found: {src}", file=sys.stderr)
+                return 1
+            copy_tree(src, unique_dest(evidence_root, src.name))
+
+        warning_text = [
+            "SENSITIVE INCIDENT PACKAGE",
+            "Treat this archive as credential-bearing evidence.",
+            "It may contain passwords, hashes, keys, tokens, session output, and attacker artifacts.",
+            "Gather logs are not equivalent to credentials.yaml: compromised-host logs can still contain raw secrets even when intel credentials are rotated/revoked.",
+            "Do not distribute outside the response team without explicit redaction and credential-rotation approval.",
+            "For a shareable report export, run: bin/ir-report --format json --redact-secrets",
+            "",
+        ]
+        if active:
+            warning_text.extend([
+                "ACTIVE / UNROTATED CREDENTIALS RECORDED:",
+                *[f"- {item}" for item in active],
+                "",
+                "Rotate or revoke these before incident closure.",
+            ])
+        else:
+            warning_text.append("No active/unrotated credentials found in credentials.yaml.")
+        (package_root / "WARNING.txt").write_text("\n".join(warning_text) + "\n", encoding="utf-8")
+
+        metadata = {
+            "case_id": case_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "intel_dir": str(intel_dir),
+            "log_dir": str(log_dir),
+            "evidence_paths": [str(Path(p).expanduser().resolve()) for p in args.evidence],
+            "active_credentials": active,
+            "sensitive": True,
+            "secret_handling": "Archive is raw credential-bearing evidence; logs may contain secrets outside credentials.yaml.",
+        }
+        entries = manifest_for(package_root)
+        write_manifests(package_root, entries, metadata)
+        create_tarball(package_root, output_tar)
+
+    print(f"Package: {output_tar}")
+    print(f"Manifest: {package_name}/MANIFEST.sha256 and MANIFEST.json")
+    print(f"Files hashed: {len(entries)}")
+    if active:
+        print(f"WARNING: {len(active)} active/unrotated credential(s) recorded. Package is sensitive.", file=sys.stderr)
+    else:
+        print("Credential warning: no active/unrotated credentials recorded.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

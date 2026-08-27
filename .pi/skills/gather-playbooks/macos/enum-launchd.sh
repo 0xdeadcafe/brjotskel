@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-launchd.sh — Enumerate launchd jobs and service persistence
+# Requires: Standard user (root improves system LaunchDaemon coverage)
+# Read-only: YES
+# Purpose: Find LaunchAgents/LaunchDaemons and loaded jobs that may provide persistence.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

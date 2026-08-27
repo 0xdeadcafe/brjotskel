@@ -2,6 +2,7 @@
 # gather/network-device/cisco-nxos.sh — Cisco NX-OS IR command reference
 # Requires: Privileged exec (admin or network-admin role)
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # Purpose: Triage a Cisco Nexus switch for active sessions, VLAN exposure,
 #          routing topology, AAA config, and evidence of tampering.
 #

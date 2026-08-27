@@ -2,6 +2,7 @@
 # gather/linux/ansible-triage.sh — Enumerate Ansible artifacts, inventory, and key references
 # Requires: Read access to Ansible paths and user homes
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1087 / T1021 / credential and pivot discovery
 
 find_ansible_inventory() {

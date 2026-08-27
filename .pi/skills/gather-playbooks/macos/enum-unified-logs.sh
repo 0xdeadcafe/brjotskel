@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-unified-logs.sh — Provide high-signal unified log hunt commands
+# Requires: Standard user (admin improves log visibility)
+# Read-only: YES
+# Purpose: Surface predicates and commands for recent launchd, auth, execution, and network activity.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

@@ -2,6 +2,16 @@
 
 101 native-OS scripts across all core skill categories. Scripts use commands already present on the target OS; run inline when possible or temporarily stage script text with cleanup. No third-party binaries land on targets.
 
+## Test objectives
+
+`bin/test` enforces more than existence:
+
+- `bin/check-playbook-inventory` verifies the documented 101-script inventory does not drift.
+- `bin/check-playbook-contracts` validates every target-side script has machine-checkable metadata: platform/function, required privileges, read-only vs state-changing, sensitive-output labeling, predictable section headers, and evidence/action/verify patterns for mutating playbooks.
+- Static guards block target-side third-party bootstrap/drop patterns such as curl/wget pipe-to-shell, Invoke-WebRequest-to-IEX, package installs, and download/execute chains.
+- Python tests execute representative safe read-only scripts outside the deployed Docker image to catch runtime assumptions. Fixture/disposable execution coverage should expand over time.
+- CI requires PowerShell syntax coverage (`BRJOTSKEL_REQUIRE_PWSH=1`) so `.ps1` parsing cannot silently skip.
+
 ---
 
 ## Gather playbooks

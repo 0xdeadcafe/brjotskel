@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-system.sh — Enumerate macOS system, user, and security context
+# Requires: Standard user
+# Read-only: YES
+# Purpose: Capture host identity, OS state, users, groups, security posture, and installed tooling.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

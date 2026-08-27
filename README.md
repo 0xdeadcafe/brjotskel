@@ -38,7 +38,7 @@ docker compose run --rm brjotskel
 
 The container drops you into [pi](https://github.com/earendil-works/pi), an AI agent pre-configured with the Ghost IR persona, all playbooks, and the intel store. Describe the incident and it gets to work.
 
-`logs/` and `workspace/` are mounted automatically — the intel store and audit logs persist across runs.
+`logs/` and `workspace/` are mounted automatically — the intel store and audit logs persist across runs. The image runs as the non-root `brjotskel` user; if your host bind mounts are not writable by UID/GID `1000:1000`, set `BRJOTSKEL_UID=$(id -u)` and `BRJOTSKEL_GID=$(id -g)` before building.
 
 **Shell access (no agent):**
 ```sh
@@ -52,12 +52,27 @@ docker compose run --rm dev
 
 **Or without Compose:**
 ```sh
-docker build -t brjotskel:local .
+docker build \
+  --build-arg BRJOTSKEL_UID="$(id -u)" \
+  --build-arg BRJOTSKEL_GID="$(id -g)" \
+  -t brjotskel:local .
 docker run --rm -it \
+  --security-opt no-new-privileges \
+  --cap-drop ALL \
   -v "$PWD/logs:/opt/brjotskel/logs" \
   -v "$PWD/workspace:/opt/brjotskel/workspace" \
   brjotskel:local
 ```
+
+### Runtime hardening
+
+Production Compose defaults run without root, deny new privileges, and drop Linux capabilities. The baked-in `.pi/` agent settings, extensions, skills, and nvim config are owned by root and read-only to the runtime user; `.pi/` itself allows only transient pi lock entries. Case data lives in writable `logs/` and `workspace/`. If you need raw-socket scans or `ping`, add capabilities explicitly in a local override and document why.
+
+The `dev` Compose service is dirty by design: it bind-mounts executable `.pi/` code from the host for live reload. Use it for development only, not incident production runs. If production needs a local config override, mount it read-only (`./.pi:/opt/brjotskel/.pi:ro`) and keep case data in `logs/`/`workspace/`.
+
+### Build reproducibility
+
+The Docker build pins the base image digest and harness dependencies: Python tools in `requirements-harness.txt` (Impacket, NetExec, Git deps, transitives), Node.js tarball + SHA-256, pi, `pi-smart-fetch`, PowerShell, and the Rust toolchain used during build. Each image includes `/opt/brjotskel/BUILD-MANIFEST.json`; CI uploads that manifest plus a CycloneDX JSON SBOM. See [CONTRIBUTING.md](CONTRIBUTING.md#dependency-pinning-and-update-workflow) before bumping dependencies or building incident-release images.
 
 ---
 
@@ -107,6 +122,19 @@ Type these directly into the agent for fast-path access:
 
 Append `--prompt` to stage an editable agent prompt, e.g. `/assess web01 --prompt`.
 
+### Agent tool inventory
+
+Generated from `.pi/extensions/*.ts` by `bin/check-tool-inventory`; do not edit by hand.
+
+<!-- BEGIN GENERATED TOOL INVENTORY -->
+| Extension | Registered tools | Count |
+|-----------|------------------|------:|
+| `intel-scan.ts` | `intel_scan` | 1 |
+| `intel-store.ts` | `intel_add`, `intel_get_cred`, `intel_map`, `intel_query`, `intel_summary`, `intel_timeline`, `intel_update` | 7 |
+| `remote-session.ts` | `remote_connect`, `remote_disconnect`, `remote_exec`, `remote_relay`, `remote_relay_close`, `remote_sessions`, `remote_tunnel`, `remote_tunnel_close`, `remote_upload` | 9 |
+| **Total** | `intel_add`, `intel_get_cred`, `intel_map`, `intel_query`, `intel_scan`, `intel_summary`, `intel_timeline`, `intel_update`, `remote_connect`, `remote_disconnect`, `remote_exec`, `remote_relay`, `remote_relay_close`, `remote_sessions`, `remote_tunnel`, `remote_tunnel_close`, `remote_upload` | **17** |
+<!-- END GENERATED TOOL INVENTORY -->
+
 > **New to the tool?** Start with [docs/getting-started.md](docs/getting-started.md) for a first-incident walkthrough.
 > For a detailed end-to-end scenario, see [docs/scenario-walkthrough.md](docs/scenario-walkthrough.md).
 
@@ -125,6 +153,8 @@ Append `--prompt` to stage an editable agent prompt, e.g. `/assess web01 --promp
 | Privilege escalation | 1 | 1 | 1 | — |
 
 The gather scripts cover: credentials, cloud tokens, SSH keys, persistence, network, AD/domain, browser artifacts, USB history, PSReadLine, DNS cache, LSASS, prefetch, Kerberos events, AppLocker, reachability probes, and more.
+
+Credential gather output is restricted evidence. Some credential scripts redact obvious values by default; set `BRJOTSKEL_REVEAL_SECRETS=1` only when raw material is needed for validation/import. Session logs and `ir-package` archives may still contain raw secrets until all touched credentials are rotated or revoked.
 
 See [docs/playbooks.md](docs/playbooks.md) for the complete script inventory with per-script descriptions.
 
@@ -169,12 +199,17 @@ intel_timeline(action="view")
 | `psexec.py`, `wmiexec.py`, `smbexec.py` | Lateral movement with recovered credentials |
 | `ntlmrelayx.py` | NTLM relay |
 | `netexec` | Credential validation at scale — SMB, WinRM, SSH, MSSQL |
-| `ir-log` | Audit logger — timestamped entries to `logs/audit-YYYYMMDD.log` |
+| `ir-log` | Audit logger — timestamped, hash-chained entries to `logs/audit-YYYYMMDD.log` |
 | `ir-search` | `fzf`-based search across audit/session logs; Enter saves selected hits to `logs/ir-search-hits.txt` |
 | `ir-report` | Incident report generator — renders intel store to markdown or JSON |
+| `ir-package` | Sensitive incident handoff package — report, intel, logs, evidence, SHA-256 manifests |
+| `build-manifest` | Image provenance generator for `/opt/brjotskel/BUILD-MANIFEST.json` |
+| `image-sbom` | CycloneDX JSON SBOM generator for built Docker images |
 | `intel-snippet` | Generate normalized `intel_add(...)` payloads from gather output |
 | `netexec-to-intel` | Convert NetExec success output into `intel_update(valid_on=...)` snippets |
 | `check-playbook-inventory` | CI guard for README/docs playbook count drift |
+| `check-playbook-contracts` | CI guard for target-side playbook metadata, safety contracts, and banned bootstrap patterns |
+| `check-tool-inventory` | CI guard/generator for extension tool inventory drift |
 | `clean-local` | Dry-run cleanup for ignored scratch/cache state; preserves logs/workspace by default |
 | `curl`, `jq`, `git`, `python3`, `ripgrep`, `fd`, `neovim` | General support |
 
@@ -197,7 +232,7 @@ intel_timeline(action="view")
 .pi/extensions/     Agent extensions: sessions, tunnels, relays, intel store, phase shortcuts
 .pi/skills/         All playbooks and reference docs (per-platform subdirectories)
 .pi/prompts/        /brief and /incident prompt templates
-bin/                ir-log, ir-search, ir-report, intel-snippet, netexec-to-intel, check-playbook-inventory, clean-local, smoke-check, test
+bin/                ir-log, ir-search, ir-report, ir-package, build-manifest, image-sbom, intel-snippet, netexec-to-intel, check-playbook-inventory, check-playbook-contracts, check-tool-inventory, clean-local, smoke-check, test
 docs/               Guides, runbooks, and reference documentation
 logs/               Audit and per-session command logs (mount to persist)
 workspace/          Intel store YAML and operator scratch space (mount to persist)
@@ -246,7 +281,7 @@ bin/clean-local --execute    # delete selected generated/scratch paths
 ## CI
 
 ```yaml
-- run: bash bin/test        # smoke check + inventory check + 41 Python unit tests + 95 Node tests
+- run: bash bin/test        # smoke check + strict TypeScript typecheck + inventory/tool-inventory/contract checks + 50 Python unit tests + 102 Node tests
 - run: docker build -t brjotskel:ci .
 ```
 

@@ -18,10 +18,17 @@ import { tmpdir } from "node:os";
 import { parseYaml, dumpYaml } from "./lib/simple-yaml.ts";
 import { addIntelRecord, appendTimelineEntry } from "./lib/intel-store-core.ts";
 import { resolveIntelDir } from "./lib/intel-helpers.ts";
+import { withIntelFileLock } from "./lib/intel-lock.ts";
 import { parseNmapGreppable } from "./lib/intel-scan-core.ts";
-import type { ScanHost } from "./lib/intel-scan-core.ts";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+type IntelScanParams = {
+  target: string;
+  ports?: number[];
+  timeout_seconds?: number;
+  via_socks_port?: number;
+};
 
 // ---------------------------------------------------------------------------
 // Nmap runner
@@ -164,7 +171,7 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelScanParams, _signal, _onUpdate, _ctx) {
       const timeoutMs = (params.timeout_seconds ?? 120) * 1000;
       const ports = params.ports ?? [];
 
@@ -195,51 +202,54 @@ export default function intelScanExtension(pi: ExtensionAPI) {
       const hostsFile = join(intelDir, "hosts.yaml");
       const timelineFile = join(intelDir, "timeline.yaml");
 
-      const added: string[] = [];
-      const skipped: string[] = [];
+      const { added, skipped } = await withIntelFileLock(intelDir, async () => {
+        const added: string[] = [];
+        const skipped: string[] = [];
+        let store = readYamlFile(hostsFile);
 
-      let store = readYamlFile(hostsFile);
+        for (const h of discovered) {
+          const id = `host-${h.ip.replace(/\./g, "-")}`;
+          const portSummary = h.openPorts.map(p => `${p.port}/${p.proto}(${p.service || "?"})`).join(", ");
 
-      for (const h of discovered) {
-        const id = `host-${h.ip.replace(/\./g, "-")}`;
-        const portSummary = h.openPorts.map(p => `${p.port}/${p.proto}(${p.service || "?"})"`).join(", ");
+          const entry = {
+            ip: h.ip,
+            hostname: h.hostname || undefined,
+            platform: h.platform,
+            status: "in-scope",
+            endpoints: h.openPorts.map(p => `${p.proto === "tcp" ? "tcp" : p.proto}://${h.ip}:${p.port}`),
+            notes: `Discovered by intel_scan: open ports ${portSummary}`,
+            source: {
+              method: params.via_socks_port ? `nmap scan (intel_scan via SOCKS 127.0.0.1:${params.via_socks_port})` : `nmap scan (intel_scan)`,
+              path: params.target,
+            },
+          };
 
-        const entry = {
-          ip: h.ip,
-          hostname: h.hostname || undefined,
-          platform: h.platform,
-          status: "in-scope",
-          endpoints: h.openPorts.map(p => `${p.proto === "tcp" ? "tcp" : p.proto}://${h.ip}:${p.port}`),
-          notes: `Discovered by intel_scan: open ports ${portSummary}`,
-          source: {
-            method: params.via_socks_port ? `nmap scan (intel_scan via SOCKS 127.0.0.1:${params.via_socks_port})` : `nmap scan (intel_scan)`,
-            path: params.target,
-          },
-        };
-
-        try {
-          store = addIntelRecord(store, "hosts", id, entry, { overwrite: false });
-          added.push(id);
-        } catch {
-          // Duplicate — already exists, skip
-          skipped.push(id);
+          try {
+            store = addIntelRecord(store, "hosts", id, entry, { overwrite: false });
+            added.push(id);
+          } catch {
+            // Duplicate — already exists, skip
+            skipped.push(id);
+          }
         }
-      }
 
-      writeYamlFile(hostsFile, store);
+        writeYamlFile(hostsFile, store);
 
-      // Append timeline entries for added hosts
-      let timelineStore = readYamlFile(timelineFile);
-      for (const id of added) {
-        timelineStore = appendTimelineEntry(timelineStore, {
-          timestamp: new Date().toISOString(),
-          type: "host",
-          action: "discovered",
-          target: id,
-          summary: `Host ${id} discovered by intel_scan of ${params.target}`,
-        });
-      }
-      writeYamlFile(timelineFile, timelineStore);
+        // Append timeline entries for added hosts
+        let timelineStore = readYamlFile(timelineFile);
+        for (const id of added) {
+          timelineStore = appendTimelineEntry(timelineStore, {
+            timestamp: new Date().toISOString(),
+            type: "host",
+            action: "discovered",
+            target: id,
+            summary: `Host ${id} discovered by intel_scan of ${params.target}`,
+          });
+        }
+        writeYamlFile(timelineFile, timelineStore);
+
+        return { added, skipped };
+      });
 
       const lines = [
         `Scan complete: ${params.target}`,

@@ -115,6 +115,8 @@ remote_exec(session="mac01", command="<read and paste macos/first-look.sh>")
 
 ### Deeper triage
 
+Credential gather output is restricted evidence. Some credential playbooks redact obvious secret values by default; set `BRJOTSKEL_REVEAL_SECRETS=1` only when raw material is required for validation/import. Session transcripts can still contain secrets. Rotation remains mandatory.
+
 - **Credentials**: `linux/hashdump.sh`, `linux/ssh-keys.sh`, `windows/enum-credentials.ps1`, `windows/psreadline-history.ps1`, `macos/enum-credentials.sh`, `macos/ssh-keys.sh`
 - **Persistence**: `linux/enum-persistence.sh`, `windows/enum-persistence.ps1`, `macos/enum-persistence.sh`
 - **Network context**: `linux/enum-network.sh`, `windows/enum-network.ps1`, `macos/enum-network.sh`
@@ -563,9 +565,28 @@ JSON export preserves the raw intel store shape plus `generated_at`. Use it for 
 ```bash
 bin/ir-report --output report.md
 bin/ir-report --format json --output report.json
+bin/ir-report --format json --redact-secrets --output report-redacted.json
 ```
 
-Reports read `workspace/intel/` by default. Override with `--intel-dir <dir>` or `BRJOTSKEL_INTEL_DIR` for alternate case workspaces.
+Reports read `workspace/intel/` by default. Override with `--intel-dir <dir>` or `BRJOTSKEL_INTEL_DIR` for alternate case workspaces. Markdown reports omit raw credential values. JSON exports include raw intel unless `--redact-secrets` is set.
+
+### Sensitive handoff package
+
+```bash
+bin/ir-package \
+  --case-id INC-2026-001 \
+  --evidence workspace/evidence/web01-memory-notes.txt \
+  --evidence workspace/loot/suspicious-service.evtx
+```
+
+`ir-package` generates `incident-report.md`, copies `workspace/intel/`, `logs/`, and selected evidence into a timestamped `*.tar.gz`, then writes `MANIFEST.json` and `MANIFEST.sha256` with per-file SHA-256 hashes. The tarball and output directory are permission-restricted. If `credentials.yaml` still contains active/unrotated credentials, the tool writes `WARNING.txt` and prints a warning on stderr. Packaging never blocks on active credentials: logs and evidence must survive, but the resulting archive is raw credential-bearing material.
+
+Default locations:
+- Intel: `${BRJOTSKEL_INTEL_DIR:-workspace/intel}`
+- Logs: `${BRJOTSKEL_LOG_DIR:-logs}`
+- Output: `workspace/packages/`
+
+Treat every package as sensitive until credential rotation is complete. `credentials.yaml` status gates only the intel secret retrieval path; it does not scrub historical gather/session logs already copied into the package.
 
 ---
 
@@ -591,6 +612,7 @@ Reports read `workspace/intel/` by default. Override with `--intel-dir <dir>` or
 | Overview of all intel | `intel_summary` |
 | In-session incident brief | `/report` |
 | Full incident report | `bin/ir-report [--format json] [--output report.md]` |
+| Sensitive handoff archive | `bin/ir-package --case-id <id> [--evidence <path>]` |
 | Record a standalone event | `intel_timeline(action="add", ...)` |
 | Log an operator action | `ir-log <description>` |
 | Scan a network segment | `nmap -Pn -sT --open -p 22,445,3389,5985 <target>` |

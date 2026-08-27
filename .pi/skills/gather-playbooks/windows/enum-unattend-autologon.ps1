@@ -1,6 +1,7 @@
 # gather/windows/enum-unattend-autologon.ps1 — Enumerate unattend, sysprep, and autologon plaintext credential sources
 # Requires: Standard user (admin may improve access to some paths)
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1552
 
 $ErrorActionPreference = 'SilentlyContinue'

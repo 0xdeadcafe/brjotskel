@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Validate generated pi extension tool inventories in docs.
+
+Inventory rule: every pi.registerTool({ name: "..." }) under .pi/extensions/*.ts
+must appear in the generated README/docs architecture inventory block. Library files are
+ignored; tools register from extension entrypoints.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+EXTENSION_DIR = REPO / ".pi" / "extensions"
+DOC_PATHS = [REPO / "README.md", REPO / "docs" / "architecture.md"]
+BEGIN = "<!-- BEGIN GENERATED TOOL INVENTORY -->"
+END = "<!-- END GENERATED TOOL INVENTORY -->"
+
+REGISTER_TOOL_RE = re.compile(
+    r"\.registerTool\s*\(\s*\{(?P<body>.*?)\n\s*\}\s*\)",
+    re.DOTALL,
+)
+NAME_RE = re.compile(r"\bname\s*:\s*['\"](?P<name>[A-Za-z0-9_-]+)['\"]")
+
+
+@dataclass(frozen=True)
+class ToolInventory:
+    by_extension: dict[str, list[str]]
+
+    @property
+    def all_tools(self) -> list[str]:
+        tools: list[str] = []
+        for names in self.by_extension.values():
+            tools.extend(names)
+        return sorted(tools)
+
+    @property
+    def total(self) -> int:
+        return len(self.all_tools)
+
+
+def extension_paths() -> list[Path]:
+    return sorted(path for path in EXTENSION_DIR.glob("*.ts") if path.is_file())
+
+
+def extract_tools(path: Path) -> list[str]:
+    content = path.read_text(encoding="utf-8")
+    tools: list[str] = []
+    for match in REGISTER_TOOL_RE.finditer(content):
+        body = match.group("body")
+        name_match = NAME_RE.search(body)
+        if not name_match:
+            continue
+        tools.append(name_match.group("name"))
+    return tools
+
+
+def build_inventory() -> ToolInventory:
+    by_extension: dict[str, list[str]] = {}
+    for path in extension_paths():
+        tools = extract_tools(path)
+        if tools:
+            by_extension[path.name] = sorted(tools)
+    return ToolInventory(by_extension=by_extension)
+
+
+def generated_block(inventory: ToolInventory) -> str:
+    lines = [
+        BEGIN,
+        "| Extension | Registered tools | Count |",
+        "|-----------|------------------|------:|",
+    ]
+    for extension, tools in sorted(inventory.by_extension.items()):
+        tool_list = ", ".join(f"`{tool}`" for tool in tools)
+        lines.append(f"| `{extension}` | {tool_list} | {len(tools)} |")
+    lines.extend([
+        f"| **Total** | {', '.join(f'`{tool}`' for tool in inventory.all_tools)} | **{inventory.total}** |",
+        END,
+    ])
+    return "\n".join(lines)
+
+
+def replace_block(content: str, block: str, path: Path) -> tuple[str, bool]:
+    if BEGIN not in content or END not in content:
+        raise ValueError(f"{path.relative_to(REPO)} missing generated inventory markers")
+    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
+    updated, count = pattern.subn(block, content, count=1)
+    if count != 1:
+        raise ValueError(f"{path.relative_to(REPO)} has duplicate or malformed generated inventory markers")
+    return updated, updated != content
+
+
+def check_doc(path: Path, block: str) -> list[str]:
+    failures: list[str] = []
+    try:
+        content = path.read_text(encoding="utf-8")
+        updated, changed = replace_block(content, block, path)
+    except ValueError as exc:
+        return [str(exc)]
+    if changed:
+        failures.append(f"{path.relative_to(REPO)} tool inventory block is stale. Run: bin/check-tool-inventory --write")
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--write", action="store_true", help="rewrite generated inventory blocks in docs")
+    parser.add_argument("--print", action="store_true", help="print the generated markdown block")
+    args = parser.parse_args(argv)
+
+    inventory = build_inventory()
+    block = generated_block(inventory)
+
+    if args.print:
+        print(block)
+        if not args.write:
+            return 0
+
+    if args.write:
+        changed: list[str] = []
+        for path in DOC_PATHS:
+            content = path.read_text(encoding="utf-8")
+            updated, did_change = replace_block(content, block, path)
+            if did_change:
+                path.write_text(updated, encoding="utf-8")
+                changed.append(str(path.relative_to(REPO)))
+        if changed:
+            print("tool inventory updated: " + ", ".join(changed))
+        else:
+            print(f"tool inventory check: OK ({inventory.total} tools; no changes)")
+        return 0
+
+    failures: list[str] = []
+    if inventory.total == 0:
+        failures.append("No registered tools found under .pi/extensions/*.ts")
+    for path in DOC_PATHS:
+        failures.extend(check_doc(path, block))
+
+    if failures:
+        print("tool inventory check: FAIL", file=sys.stderr)
+        for failure in failures:
+            print(f"- {failure}", file=sys.stderr)
+        print("\nGenerated block:", file=sys.stderr)
+        print(block, file=sys.stderr)
+        return 1
+
+    print(f"tool inventory check: OK ({inventory.total} tools)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

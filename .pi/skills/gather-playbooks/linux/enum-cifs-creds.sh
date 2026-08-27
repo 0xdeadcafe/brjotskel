@@ -2,6 +2,7 @@
 # gather/linux/enum-cifs-creds.sh — Enumerate SMB/CIFS mount credentials and target shares
 # Requires: read access to /etc and user homes
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1552 / T1021.002
 
 homes() {

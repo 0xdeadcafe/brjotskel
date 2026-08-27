@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-browser-artifacts.sh — Enumerate browser artifacts and admin-console clues
+# Requires: Standard user (some paths may need elevation)
+# Read-only: YES
+# Purpose: Identify browser history/profile/cache artifacts useful for access and investigation context.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

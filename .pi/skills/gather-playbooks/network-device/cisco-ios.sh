@@ -2,6 +2,7 @@
 # gather/network-device/cisco-ios.sh — Cisco IOS/IOS-XE IR command reference
 # Requires: Privileged exec mode (enable)
 # Read-only: YES — show/display commands only
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # Footprint: Zero on device
 # Purpose: Triage a Cisco IOS router/switch for active sessions, credential
 #          exposure, lateral movement paths, and evidence of tampering.

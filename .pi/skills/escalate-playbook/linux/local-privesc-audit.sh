@@ -1,4 +1,8 @@
 #!/bin/sh
+# escalate/linux/local-privesc-audit.sh — Assess Linux privilege-escalation paths
+# Requires: Standard user (some checks benefit from root)
+# Read-only: YES
+# Purpose: Audit sudo, SUID/SGID, capabilities, writable privileged paths, automation, and GTFOBins-style candidates.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

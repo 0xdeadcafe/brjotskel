@@ -2,6 +2,7 @@
 # gather/linux/enum-user-history.sh — Enumerate user shell history and suspicious execution patterns
 # Requires: read access to user homes
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1059 / T1552
 
 homes() {

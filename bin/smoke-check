@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 step=1
 announce() {
-  echo "[$step/7] $*"
+  echo "[$step/8] $*"
   step=$((step + 1))
 }
 
@@ -68,6 +68,10 @@ if command -v pwsh >/dev/null 2>&1; then
   done
 else
   echo "pwsh not found; skipping ${#powershell_scripts[@]} PowerShell script(s)"
+  if [[ "${BRJOTSKEL_REQUIRE_PWSH:-0}" == "1" ]]; then
+    echo "BRJOTSKEL_REQUIRE_PWSH=1 set; PowerShell syntax coverage is required" >&2
+    exit 1
+  fi
 fi
 
 announce "banned-pattern checks"
@@ -78,6 +82,28 @@ fi
 if rg -n "crackmapexec|CrackMapExec" README.md docs .pi/extensions .pi/skills >/dev/null; then
   echo "Found stale CrackMapExec references; use netexec consistently"
   exit 1
+fi
+
+announce "build integrity metadata"
+for path in bin/build-manifest bin/image-sbom; do
+  if [[ ! -x "$path" ]]; then
+    echo "Build integrity helper missing or not executable: $path" >&2
+    exit 1
+  fi
+done
+if [[ -f Dockerfile ]] && ! rg -q "/opt/brjotskel/BUILD-MANIFEST.json" Dockerfile; then
+  echo "Dockerfile must generate /opt/brjotskel/BUILD-MANIFEST.json" >&2
+  exit 1
+fi
+if [[ -f .github/workflows/ci.yml ]]; then
+  if ! rg -q "bin/image-sbom brjotskel:ci" .github/workflows/ci.yml; then
+    echo "CI must generate an SBOM artifact with bin/image-sbom" >&2
+    exit 1
+  fi
+  if ! rg -q "brjotskel-build-integrity|upload-artifact" .github/workflows/ci.yml; then
+    echo "CI must upload build integrity artifacts" >&2
+    exit 1
+  fi
 fi
 
 announce "shebang executable bit check"

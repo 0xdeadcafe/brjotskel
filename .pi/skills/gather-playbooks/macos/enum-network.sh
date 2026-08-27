@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-network.sh — Enumerate macOS network configuration and live connections
+# Requires: Standard user
+# Read-only: YES
+# Purpose: Capture interfaces, routes, DNS, listeners, and active connections for pivot/C2 triage.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

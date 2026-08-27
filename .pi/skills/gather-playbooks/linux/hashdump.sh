@@ -2,6 +2,7 @@
 # gather/linux/hashdump.sh — Dump password hashes
 # Requires: root or read access to /etc/shadow
 # Read-only: YES (only reads files)
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1003.008 — /etc/passwd and /etc/shadow
 
 echo "=== PASSWD ==="

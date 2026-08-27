@@ -2,6 +2,7 @@
 # gather/linux/enum-vpn-creds.sh — Enumerate VPN configs, credentials, and endpoint hints
 # Requires: read access to /etc and user homes
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1552 / T1021
 
 homes() {

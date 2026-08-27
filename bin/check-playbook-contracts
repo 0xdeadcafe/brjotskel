@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Validate operator-facing playbook safety/behavior contracts.
+
+This is a static contract gate, not a target execution harness. It checks that the
+101 target-side scripts/snippets have enough machine-readable metadata and do not
+recommend dangerous third-party bootstrap/drop patterns on targets.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+SKILL_ROOT = REPO / ".pi" / "skills"
+
+CATEGORIES = {
+    "gather-playbooks": "gather",
+    "host-ir-playbooks": "host-ir",
+    "containment-playbooks": "containment",
+    "eradication-playbooks": "eradication",
+    "escalate-playbook": "escalate",
+}
+PLATFORMS = {"linux", "windows", "macos", "network-device"}
+SCRIPT_SUFFIXES = {".sh", ".ps1"}
+STATE_CHANGING_CATEGORIES = {"containment", "eradication"}
+MUTATING_GATHER = {
+    "gather-playbooks/windows/hashdump.ps1",
+    "gather-playbooks/windows/lsass-dump.ps1",
+}
+
+BANNED_PATTERNS = [
+    (re.compile(r"(?:curl|wget)\b[^\n|;]*https?://[^\n|;]*(?:\||;|&&)\s*(?:sh|bash|zsh|pwsh|powershell)\b", re.I), "target-side curl/wget pipe-to-shell bootstrap"),
+    (re.compile(r"Invoke-WebRequest\b[^\n|;]*(?:\||;|&&)\s*(?:Invoke-Expression|iex)\b", re.I), "target-side Invoke-WebRequest-to-IEX bootstrap"),
+    (re.compile(r"\b(?:pip3?|npm|go)\s+install\b", re.I), "target-side package install"),
+    (re.compile(r"(?:curl|wget|Invoke-WebRequest)\b[^\n]*(?:chmod\s+\+x|Start-Process|\.exe\b).*", re.I), "download-and-execute chain"),
+]
+
+SENSITIVE_OUTPUT_PLAYBOOKS = {
+    "gather-playbooks/linux/ansible-triage.sh",
+    "gather-playbooks/linux/collect-evidence.sh",
+    "gather-playbooks/linux/enum-cifs-creds.sh",
+    "gather-playbooks/linux/enum-cloud-credentials.sh",
+    "gather-playbooks/linux/enum-credentials.sh",
+    "gather-playbooks/linux/enum-user-history.sh",
+    "gather-playbooks/linux/enum-vpn-creds.sh",
+    "gather-playbooks/linux/hashdump.sh",
+    "gather-playbooks/linux/ssh-keys.sh",
+    "gather-playbooks/linux/triage.sh",
+    "gather-playbooks/macos/collect-evidence.sh",
+    "gather-playbooks/macos/enum-credentials.sh",
+    "gather-playbooks/macos/ssh-keys.sh",
+    "gather-playbooks/network-device/cisco-ios.sh",
+    "gather-playbooks/network-device/cisco-nxos.sh",
+    "gather-playbooks/network-device/juniper-junos.sh",
+    "gather-playbooks/windows/enum-ad.ps1",
+    "gather-playbooks/windows/enum-cloud-credentials.ps1",
+    "gather-playbooks/windows/enum-credentials.ps1",
+    "gather-playbooks/windows/enum-unattend-autologon.ps1",
+    "gather-playbooks/windows/hashdump.ps1",
+    "gather-playbooks/windows/lsass-dump.ps1",
+    "gather-playbooks/windows/psreadline-history.ps1",
+    "gather-playbooks/windows/putty-sessions.ps1",
+}
+
+SECTION_PATTERNS = [
+    re.compile(r"===\s*[^=]+\s*==="),
+    re.compile(r"function\s+Sec\s*\(", re.I),
+    re.compile(r"^#\s*---\s*[^-]+\s*---", re.M),
+]
+
+
+@dataclass(frozen=True)
+class Playbook:
+    path: Path
+    rel: str
+    category: str
+    platform: str
+
+
+def operator_playbooks() -> list[Playbook]:
+    playbooks: list[Playbook] = []
+    for skill_dir, category in CATEGORIES.items():
+        for platform in PLATFORMS:
+            base = SKILL_ROOT / skill_dir / platform
+            if not base.exists():
+                continue
+            for path in sorted(base.iterdir()):
+                if not path.is_file() or path.suffix not in SCRIPT_SUFFIXES:
+                    continue
+                rel = path.relative_to(SKILL_ROOT).as_posix()
+                playbooks.append(Playbook(path=path, rel=rel, category=category, platform=platform))
+    return sorted(playbooks, key=lambda p: p.rel)
+
+
+def header_text(text: str, max_lines: int = 30) -> str:
+    lines = []
+    for line in text.splitlines()[:max_lines]:
+        stripped = line.strip()
+        if not stripped:
+            lines.append(line)
+            continue
+        if stripped.startswith("#!") or stripped.startswith("#") or stripped.startswith("param("):
+            lines.append(line)
+            continue
+        if stripped.startswith("set ") or stripped.startswith("$ErrorActionPreference"):
+            lines.append(line)
+            continue
+        # Keep early OBJECTIVE helpers as metadata for compact scripts.
+        if "sec OBJECTIVE" in line or "function Sec" in line or "printf '%s" in line:
+            lines.append(line)
+            continue
+        break
+    return "\n".join(lines)
+
+
+def is_state_changing(pb: Playbook, text: str, header: str) -> bool:
+    if pb.category in STATE_CHANGING_CATEGORIES:
+        return True
+    if pb.rel in MUTATING_GATHER:
+        return True
+    return bool(re.search(r"(?:State-changing:\s*YES|Read-only:\s*NO)", header, re.I))
+
+
+def has_mutation_guard(text: str) -> bool:
+    guard_markers = [
+        r"die\(\)\{",
+        r"\[\s*-z\s+\"?\$[A-Za-z_][A-Za-z0-9_]*",
+        r"Write-Error\s+\"Set\s+`?\$",
+        r"exit\s+1",
+        r"DRY_RUN|--dry-run|-WhatIf|SupportsShouldProcess|ConfirmImpact|\$Confirm",
+    ]
+    return sum(1 for pat in guard_markers if re.search(pat, text, re.I)) >= 2
+
+
+def can_emit_sensitive_material(pb: Playbook, text: str) -> bool:
+    return pb.rel in SENSITIVE_OUTPUT_PLAYBOOKS
+
+
+def check_playbook(pb: Playbook) -> list[str]:
+    failures: list[str] = []
+    text = pb.path.read_text(encoding="utf-8", errors="replace")
+    header = header_text(text)
+
+    if pb.path.suffix == ".sh" and not text.startswith("#!"):
+        failures.append("shell script missing shebang")
+
+    expected_route = f"{pb.category}/{pb.platform}/"
+    if expected_route not in text[:500] and not re.search(r"sec OBJECTIVE|Purpose:", header, re.I):
+        failures.append(f"header missing route/purpose marker ({expected_route})")
+
+    if not re.search(r"Requires:\s*\S", header, re.I):
+        failures.append("header missing Requires metadata")
+
+    has_readonly = re.search(r"Read-only:\s*(YES|NO)", header, re.I) is not None
+    has_state = re.search(r"State-changing:\s*(YES|NO)", header, re.I) is not None
+    if not (has_readonly or has_state):
+        failures.append("header missing Read-only or State-changing metadata")
+
+    mutates = is_state_changing(pb, text, header)
+    if mutates:
+        if not re.search(r"(?:State-changing:\s*YES|Read-only:\s*NO)", header, re.I):
+            failures.append("mutating playbook must declare State-changing: YES or Read-only: NO")
+        if not re.search(r"Pattern:\s*.*(?:EVIDENCE|RECORD|CAPTURE|LOCK IN ANALYST).*VERIFY", header, re.I | re.S):
+            failures.append("mutating playbook missing evidence/action/verify Pattern metadata")
+        if not has_mutation_guard(text):
+            failures.append("mutating playbook missing explicit parameter/dry-run/confirm guard")
+    else:
+        if not re.search(r"Read-only:\s*YES|State-changing:\s*NO", header, re.I):
+            failures.append("read-only playbook must declare Read-only: YES or State-changing: NO")
+        if not any(p.search(text) for p in SECTION_PATTERNS):
+            failures.append("read-only playbook missing predictable section headers")
+
+    if can_emit_sensitive_material(pb, text) and not re.search(r"Sensitive-output:\s*YES", header, re.I):
+        failures.append("script may emit credential material but lacks Sensitive-output: YES metadata")
+
+    for pattern, reason in BANNED_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            line_no = text[:match.start()].count("\n") + 1
+            failures.append(f"banned pattern ({reason}) at line {line_no}")
+
+    return failures
+
+
+def main() -> int:
+    playbooks = operator_playbooks()
+    failures: dict[str, list[str]] = {}
+    for pb in playbooks:
+        pb_failures = check_playbook(pb)
+        if pb_failures:
+            failures[pb.rel] = pb_failures
+
+    sensitive = sum(1 for pb in playbooks if can_emit_sensitive_material(pb, pb.path.read_text(encoding="utf-8", errors="replace")))
+    mutating = sum(1 for pb in playbooks if is_state_changing(pb, pb.path.read_text(encoding="utf-8", errors="replace"), header_text(pb.path.read_text(encoding="utf-8", errors="replace"))))
+
+    if failures:
+        print("playbook contract check: FAIL", file=sys.stderr)
+        for rel, issues in failures.items():
+            print(f"- {rel}", file=sys.stderr)
+            for issue in issues:
+                print(f"  * {issue}", file=sys.stderr)
+        print(f"\nChecked {len(playbooks)} playbooks ({mutating} mutating, {sensitive} sensitive-output candidates).", file=sys.stderr)
+        return 1
+
+    print(f"playbook contract check: OK ({len(playbooks)} scripts; {mutating} mutating; {sensitive} sensitive-output labeled)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -15,7 +15,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: '.nvmrc'
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -27,8 +27,47 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyyaml
 
+      - name: Install Node deps
+        run: npm ci --ignore-scripts
+
       - name: Run tests
+        env:
+          BRJOTSKEL_REQUIRE_PWSH: '1'
         run: bash bin/test
 
       - name: Docker build smoke
-        run: docker build -t brjotskel:ci .
+        run: |
+          docker build \
+            --build-arg BRJOTSKEL_BUILD_REF="${GITHUB_SHA}" \
+            --build-arg BRJOTSKEL_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg BRJOTSKEL_BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -t brjotskel:ci .
+
+      - name: Validate image build manifest
+        run: |
+          docker run --rm --entrypoint python3 brjotskel:ci -m json.tool /opt/brjotskel/BUILD-MANIFEST.json >/dev/null
+          docker run -i --rm --entrypoint python3 brjotskel:ci - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('/opt/brjotskel/BUILD-MANIFEST.json').read_text())
+          required_tools = ['node', 'npm', 'pi', 'pwsh', 'python3', 'nmap', 'netexec', 'ssh']
+          missing = [tool for tool in required_tools if not manifest.get('tool_versions', {}).get(tool)]
+          if missing:
+              raise SystemExit(f'Missing tool version(s): {missing}')
+          if manifest.get('source', {}).get('BRJOTSKEL_BUILD_REF') != '${{ github.sha }}':
+              raise SystemExit('BUILD-MANIFEST.json does not record this Git revision')
+          PY
+
+      - name: Generate SBOM artifact
+        run: |
+          mkdir -p artifacts
+          bin/image-sbom brjotskel:ci > artifacts/brjotskel-sbom.cdx.json
+          docker run --rm --entrypoint cat brjotskel:ci /opt/brjotskel/BUILD-MANIFEST.json > artifacts/BUILD-MANIFEST.json
+
+      - name: Upload build integrity artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: brjotskel-build-integrity
+          path: |
+            artifacts/brjotskel-sbom.cdx.json
+            artifacts/BUILD-MANIFEST.json

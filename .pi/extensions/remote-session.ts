@@ -58,15 +58,12 @@
  *   - pwsh (PowerShell) — optional, for WinRM
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { psSingleQuote, shellSingleQuote, detectSshShell, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
-import { chooseSessionName, buildMarkerCommand, buildTunnelSshArgs, buildTunnelDescription, buildTunnelUsageHint, processTelnetBytes, parseHostPortTarget, parseWinRmTarget, detectRelayMethods, buildRelayCommand, buildRelayCleanupCommand, buildRelayProbeCommand, buildRelayVerifyCommand, relayVerifyOutputConfirmsListening, validateRelaySpec, type RelayMethod, type RelaySpec } from "./lib/remote-session-core.ts";
+import { psSingleQuote, shellSingleQuote, cleanCommandOutput, type ShellFamily } from "./lib/remote-helpers.ts";
+import { chooseSessionName, buildMarkerCommand, buildTunnelSshArgs, buildTunnelDescription, buildTunnelUsageHint, parseHostPortTarget, type RelayMethod } from "./lib/remote-session-core.ts";
 import { registerRemoteSlashCommands } from "./lib/operator-runtime.ts";
-import { type Protocol, type TunnelType, type SessionInfo, type RemoteSession, type TunnelInfo, type RelayInfo, MARKER_PREFIX, MARKER_SUFFIX, COMMAND_TIMEOUT_MS, generateMarker, generateId, killTrackedProcess, logToSession as _logToSession, getLogPath as _getLogPath, resolveRemoteSessionLogDir } from "./lib/remote-types.ts";
+import { type SessionInfo, type RemoteSession, type TunnelInfo, type RelayInfo, COMMAND_TIMEOUT_MS, generateMarker, generateId, killTrackedProcess, logToSession as _logToSession, logRemoteCommandEvent as _logRemoteCommandEvent, getLogPath as _getLogPath, resolveRemoteSessionLogDir } from "./lib/remote-types.ts";
 import { connectSSH } from "./lib/protocol-adapters/ssh.ts";
 import { connectWinRM } from "./lib/protocol-adapters/winrm.ts";
 import { connectTCP, connectTelnet } from "./lib/protocol-adapters/tcp-telnet.ts";
@@ -85,6 +82,49 @@ const activeRelays: RelayInfo[] = [];
 let tunnelCounter = 0;
 let relayCounter = 0;
 let defaultSessionName: string | null = null;
+
+type RemoteConnectParams = {
+  protocol: "ssh" | "winrm" | "tcp" | "telnet";
+  target: string;
+  name: string;
+  port?: number;
+  identity?: string;
+  proxy_jump?: string;
+  user?: string;
+  password?: string;
+  use_ssl?: boolean;
+  skip_cert_check?: boolean;
+  platform_hint?: SessionInfo["platform"];
+  shell_hint?: ShellFamily;
+  set_default?: boolean;
+};
+
+type RemoteExecParams = { command: string; session?: string; timeout?: number };
+type RemoteUploadParams = { content: string; remote_path: string; session?: string; executable?: boolean };
+type RemoteDisconnectParams = { session?: string };
+type RemoteTunnelParams = {
+  type: "local" | "remote" | "dynamic";
+  via: string;
+  local_port: number;
+  remote_host?: string;
+  remote_port?: number;
+  ssh_port?: number;
+  identity?: string;
+  password?: string;
+  proxy_jump?: string;
+  description?: string;
+};
+type RemoteTunnelCloseParams = { id?: string };
+type RemoteRelayParams = {
+  session: string;
+  target_host: string;
+  target_port: number;
+  listen_port: number;
+  method?: RelayMethod | "auto";
+  listen_address?: string;
+  description?: string;
+};
+type RemoteRelayCloseParams = { id?: string };
 
 function currentRemoteLogDir(): string {
   return resolveRemoteSessionLogDir(process.cwd(), process.env);
@@ -130,26 +170,50 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
     session.info.lastCommandAt = new Date();
     log(session.info.name, ">>>", command);
 
+    const commandId = generateId();
+    const startedAt = new Date();
+    const logCommandEvent = (status: "completed" | "timeout" | "failed", output: string, tainted = false) => {
+      _logRemoteCommandEvent(currentRemoteLogDir(), session, {
+        commandId,
+        command,
+        status,
+        startedAt,
+        completedAt: new Date(),
+        output,
+        tainted,
+      });
+    };
+
     if (session.info.protocol === "tcp" || session.info.protocol === "telnet") {
       // TCP/telnet modes are best-effort only: output is collected by timeout/prompt heuristics.
       session.buffer = "";
       session.process.stdin!.write(command + "\r\n");
 
       const collectTimeout = setTimeout(() => {
-        const output = session.buffer.trim();
-        session.buffer = "";
-        log(session.info.name, "<<<", output);
-        resolve(output);
+        try {
+          const output = session.buffer.trim();
+          session.buffer = "";
+          log(session.info.name, "<<<", output);
+          logCommandEvent("completed", output);
+          resolve(output);
+        } catch (err: any) {
+          reject(err);
+        }
       }, Math.min(timeoutMs, 5000));
 
       const checkInterval = setInterval(() => {
         if (session.buffer.match(/[#>$%]\s*$/)) {
           clearTimeout(collectTimeout);
           clearInterval(checkInterval);
-          const output = session.buffer.trim();
-          session.buffer = "";
-          log(session.info.name, "<<<", output);
-          resolve(output);
+          try {
+            const output = session.buffer.trim();
+            session.buffer = "";
+            log(session.info.name, "<<<", output);
+            logCommandEvent("completed", output);
+            resolve(output);
+          } catch (err: any) {
+            reject(err);
+          }
         }
       }, 200);
 
@@ -158,7 +222,6 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
     }
 
     const marker = generateMarker();
-    const commandId = generateId();
     session.buffer = "";
 
     const timeout = setTimeout(() => {
@@ -168,8 +231,13 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       session.buffer = "";
       const reason = `previous command timed out after ${timeoutMs / 1000}s and may still be running`;
       session.tainted = { reason, at: new Date(), command };
-      log(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s; SESSION TAINTED] ${partial}`);
-      resolve(`[Command timed out after ${timeoutMs / 1000}s]\nSession marked tainted because the remote command may still be running. Disconnect and reconnect before issuing more commands.\n${partial}`);
+      try {
+        log(session.info.name, "<<<", `[TIMEOUT after ${timeoutMs / 1000}s; SESSION TAINTED] ${partial}`);
+        logCommandEvent("timeout", partial, true);
+        resolve(`[Command timed out after ${timeoutMs / 1000}s]\nSession marked tainted because the remote command may still be running. Disconnect and reconnect before issuing more commands.\n${partial}`);
+      } catch (err: any) {
+        reject(err);
+      }
     }, timeoutMs);
 
     session.commandQueue.push({
@@ -177,9 +245,14 @@ function execCommand(session: RemoteSession, command: string, timeoutMs = COMMAN
       command,
       marker,
       resolve: (output) => {
-        const cleaned = cleanCommandOutput(session, command, output);
-        log(session.info.name, "<<<", cleaned);
-        resolve(cleaned);
+        try {
+          const cleaned = cleanCommandOutput(session, command, output);
+          log(session.info.name, "<<<", cleaned);
+          logCommandEvent("completed", cleaned);
+          resolve(cleaned);
+        } catch (err: any) {
+          reject(err);
+        }
       },
       reject,
       timeout,
@@ -230,7 +303,7 @@ export default function (pi: ExtensionAPI) {
       set_default: Type.Optional(Type.Boolean({ description: "Set this as the default session for remote_exec (default: true if first session)" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: RemoteConnectParams, _signal, _onUpdate, ctx) {
       if (sessions.has(params.name)) {
         throw new Error(`Session '${params.name}' already exists. Disconnect it first or use a different name.`);
       }
@@ -335,7 +408,7 @@ export default function (pi: ExtensionAPI) {
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 60)" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: RemoteExecParams, _signal, _onUpdate, _ctx) {
       const session = getSession(params.session);
 
       if (!session.process || session.process.killed) {
@@ -387,7 +460,7 @@ export default function (pi: ExtensionAPI) {
       executable: Type.Optional(Type.Boolean({ description: "Make the file executable after writing (default: false)" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: RemoteUploadParams, _signal, _onUpdate, _ctx) {
       const session = getSession(params.session);
 
       if (!session.process || session.process.killed) {
@@ -514,7 +587,7 @@ export default function (pi: ExtensionAPI) {
       session: Type.Optional(Type.String({ description: "Session name to disconnect. Omit to disconnect all sessions." })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: RemoteDisconnectParams, _signal, _onUpdate, ctx) {
       if (sessions.size === 0) {
         return {
           content: [{ type: "text", text: "No active sessions to disconnect." }],
@@ -595,7 +668,7 @@ export default function (pi: ExtensionAPI) {
       description: Type.Optional(Type.String({ description: "Human description (e.g., 'SOCKS through web01 to DB segment')" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: RemoteTunnelParams, _signal, _onUpdate, ctx) {
       if (params.type === "local" && (!params.remote_host || !params.remote_port)) {
         throw new Error("remote_host and remote_port are required for local forwards.");
       }
@@ -700,7 +773,7 @@ export default function (pi: ExtensionAPI) {
       id: Type.Optional(Type.String({ description: "Tunnel ID (e.g., 'tun-1'). Omit to close all." })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: RemoteTunnelCloseParams, _signal, _onUpdate, ctx) {
       if (activeTunnels.length === 0) {
         return {
           content: [{ type: "text", text: "No active tunnels." }],
@@ -764,7 +837,7 @@ export default function (pi: ExtensionAPI) {
       description: Type.Optional(Type.String({ description: "Human description of this relay" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: RemoteRelayParams, _signal, _onUpdate, ctx) {
       const session = getSession(params.session);
 
       if (!session.process || session.process.killed) {
@@ -848,7 +921,7 @@ export default function (pi: ExtensionAPI) {
       id: Type.Optional(Type.String({ description: "Relay ID (e.g., 'relay-1'). Omit to close all relays." })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: RemoteRelayCloseParams, _signal, _onUpdate, _ctx) {
       if (activeRelays.length === 0) {
         return {
           content: [{ type: "text", text: "No active relays." }],

@@ -2,7 +2,21 @@
 # gather/linux/enum-containers.sh — Docker/Podman/LXC/K8s enumeration
 # Requires: docker/podman group membership or root
 # Read-only: YES
+# Sensitive-output: YES — redacted by default; set BRJOTSKEL_REVEAL_SECRETS=1 to print raw service-account token material
 # MITRE ATT&CK: T1610 — Deploy Container, T1613 — Container Discovery
+
+set -u
+REVEAL_SECRETS="${BRJOTSKEL_REVEAL_SECRETS:-0}"
+show_token_file_meta() {
+  f="$1"
+  if [ "$REVEAL_SECRETS" = "1" ]; then
+    cat "$f" 2>/dev/null
+  else
+    printf '[REDACTED] token file present: %s\n' "$f"
+    wc -c "$f" 2>/dev/null | awk '{print "bytes: " $1}'
+    sha256sum "$f" 2>/dev/null | awk '{print "sha256: " $1}'
+  fi
+}
 
 echo "=== CONTAINER RUNTIME ==="
 command -v docker >/dev/null 2>&1 && echo "docker: $(docker --version 2>/dev/null)"
@@ -54,7 +68,7 @@ if command -v kubectl >/dev/null 2>&1; then
   kubectl get serviceaccounts --all-namespaces 2>/dev/null | head -20
 fi
 # Check for service account token
-[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ] && echo "K8S SA TOKEN: present" && cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null
+[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ] && echo "K8S SA TOKEN: present" && show_token_file_meta /var/run/secrets/kubernetes.io/serviceaccount/token
 
 echo ""
 echo "=== DOCKER SOCKET ==="

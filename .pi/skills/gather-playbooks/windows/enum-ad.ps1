@@ -1,6 +1,7 @@
 # gather/windows/enum-ad.ps1 — Active Directory enumeration
 # Requires: Domain user (no special privileges needed for most queries)
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1087.002 — Domain Account Discovery
 
 $ErrorActionPreference = 'SilentlyContinue'

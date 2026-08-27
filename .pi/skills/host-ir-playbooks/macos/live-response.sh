@@ -1,4 +1,8 @@
 #!/bin/sh
+# host-ir/macos/live-response.sh — macOS live-response triage
+# Requires: Standard user (root/admin improves coverage)
+# Read-only: YES
+# Purpose: Capture host role, live sessions, launchd persistence, recent execution clues, and security state.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

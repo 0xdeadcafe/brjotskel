@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ir-log — Append an audit entry tagged with local execution context.
+# ir-log — Append a hash-chained audit entry tagged with local execution context.
 # Supports two output formats:
-#   text (default)  — human-readable %q-quoted fields
-#   jsonl           — NDJSON; set BRJOTSKEL_LOG_FORMAT=jsonl
+#   text (default)  — human-readable %q-quoted fields with entry_hash
+#   jsonl           — NDJSON with entry_hash/previous_entry_hash; set BRJOTSKEL_LOG_FORMAT=jsonl
 #
 # Usage: ir-log <event description>
 # Environment:
@@ -19,28 +19,53 @@ operator_name="${USER:-$(id -un 2>/dev/null || printf 'unknown-user')}"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 auth_ctx="${BRJOTSKEL_AUTH_CONTEXT:-}"
 event="$*"
+prev_hash=""
+if [[ -s "$log_file" ]]; then
+  prev_hash="$(tail -n 1 "$log_file" | sha256sum | awk '{print $1}')"
+fi
+entry_hash="$({
+  python3 -c '
+import hashlib, json, sys
+payload = {
+    "ts": sys.argv[1],
+    "operator": sys.argv[2],
+    "host": sys.argv[3],
+    "event": sys.argv[4],
+    "previous_entry_hash": sys.argv[6] or None,
+}
+if sys.argv[5]:
+    payload["auth"] = sys.argv[5]
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+print(hashlib.sha256(canonical.encode()).hexdigest())
+' "$ts" "$operator_name" "$host_name" "$event" "$auth_ctx" "$prev_hash"
+})"
 
 if [[ "${BRJOTSKEL_LOG_FORMAT:-}" == "jsonl" ]]; then
-  # NDJSON output — fields: ts, operator, host, auth (omitted if empty), event
-  # Use python3 for reliable JSON escaping without external deps
-  python3 -c "
+  # NDJSON output — hash-chained fields: ts, operator, host, auth?, event,
+  # previous_entry_hash, entry_hash. Use python3 for reliable JSON escaping.
+  python3 -c '
 import json, sys
 fields = {
-    'ts':       sys.argv[1],
-    'operator': sys.argv[2],
-    'host':     sys.argv[3],
-    'event':    sys.argv[4],
+    "ts":       sys.argv[1],
+    "operator": sys.argv[2],
+    "host":     sys.argv[3],
+    "event":    sys.argv[4],
+    "entry_hash": sys.argv[7],
 }
 auth = sys.argv[5]
+prev_hash = sys.argv[6]
 if auth:
-    fields['auth'] = auth
-print(json.dumps(fields, ensure_ascii=False))
-" "$ts" "$operator_name" "$host_name" "$event" "$auth_ctx" >> "$log_file"
+    fields["auth"] = auth
+if prev_hash:
+    fields["previous_entry_hash"] = prev_hash
+print(json.dumps(fields, ensure_ascii=False, sort_keys=True))
+' "$ts" "$operator_name" "$host_name" "$event" "$auth_ctx" "$prev_hash" "$entry_hash" >> "$log_file"
 else
-  # Default text format — %q-quoted for shell-safe grep and manual review
+  # Default text format — %q-quoted for shell-safe grep and manual review.
+  # Hash fields precede event so existing event-tail grep/review remains clean.
   if [[ -n "$auth_ctx" ]]; then
-    printf '%s auth=%q operator=%q host=%q event=%q\n' "$ts" "$auth_ctx" "$operator_name" "$host_name" "$event" >> "$log_file"
+    printf '%s prev_hash=%q entry_hash=%q auth=%q operator=%q host=%q event=%q\n' "$ts" "$prev_hash" "$entry_hash" "$auth_ctx" "$operator_name" "$host_name" "$event" >> "$log_file"
   else
-    printf '%s operator=%q host=%q event=%q\n' "$ts" "$operator_name" "$host_name" "$event" >> "$log_file"
+    printf '%s prev_hash=%q entry_hash=%q operator=%q host=%q event=%q\n' "$ts" "$prev_hash" "$entry_hash" "$operator_name" "$host_name" "$event" >> "$log_file"
   fi
 fi

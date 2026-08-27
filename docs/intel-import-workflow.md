@@ -256,6 +256,8 @@ intel_update(category="pivot", id="to-dc01",
 
 **Terminal credential statuses:** `intel_get_cred` refuses to return secrets for credentials with status `rotated`, `expired`, `revoked`, `disabled`, `inactive`, or `invalid`. Use `force=true` on `intel_update` only to correct an erroneously set terminal status; for new secrets after rotation, create a new credential ID.
 
+**Split secret stores:** `credentials.yaml` is not the only place secrets can live. Remote session transcripts and gather output may contain raw passwords, hashes, keys, and tokens captured before import. Some gather credential scripts redact obvious values by default and accept `BRJOTSKEL_REVEAL_SECRETS=1` when raw material is needed, but archive/report handling must still treat logs as credential-bearing evidence. Use `bin/ir-report --format json --redact-secrets` for shareable JSON exports; `bin/ir-package` intentionally preserves raw evidence and warns instead of blocking.
+
 ---
 
 ## Querying the store

@@ -2,82 +2,40 @@
 
 Product backlog and engineering roadmap. Ghost review pass — attacker-first framing throughout.
 
-> **Test status:** `bash bin/test` — 41 Python + 95 Node tests, all passing. Docker smoke build is configured in CI; rerun locally after dependency pinning or Dockerfile changes.
+> **Test status:** `bash bin/test` — strict TypeScript typecheck + 52 Python + 102 Node tests, all passing. Docker smoke build is configured in CI; rerun locally after dependency pinning or Dockerfile changes.
 
 ---
 
 ## Priority lens
 
-- **P0**: blocks safe operation now or creates uncontrolled evidence/secret exposure by default.
+- **P0**: blocks safe operation now or can corrupt evidence immediately.
 - **P1**: fix before the next real incident image is trusted — reproducibility, integrity, report correctness.
 - **P2**: high operator leverage — reduces manual misses and closes workflow gaps.
 - **P3**: simplification, drift control, developer ergonomics, bloat reduction.
 
 ## Recommended execution order
 
-1. **#44** — P0. Stop default raw secret sprawl. Current Linux/cloud/credential gather paths can leak usable material into session logs.
-2. **#14** — P1. Pin the build before trusting a new incident image. Reproducibility is part of evidence credibility.
-3. **#48** — P2. Package evidence/reports after #44, so archives do not preserve today’s secret leakage.
-4. **#20** — P3. Cheap image-size/CI cleanup; safe to batch with #14 if already editing Dockerfile.
-5. **#52** — P3. Defer tmux backend as a prototype only; useful for SSH/telnet, risky until secret-output policy is settled.
+*No active TODOs.*
 
 ---
 
 ## 🔴 P0 — Blocker
 
-### 44. Secret handling is split-brain: gather scripts dump secrets into logs, intel store separately stores secrets
-
-Credential recovery currently means secrets often appear in remote session logs, then the operator manually copies them into `workspace/intel` and `intel_add`. That creates two secret stores: intel and logs. Current defaults are too hot: Linux `ssh-keys.sh` and `triage.sh` can print private keys, Linux/cloud scripts can print static keys/tokens, and Windows credential/cloud/LAPS paths can print usable credential material. This expands rotation scope to operator logs, report packages, terminal scrollback, and any copied transcript.
-
-- **Risk:** Dirty by default. A normal gather run can leak usable credentials into long-lived logs before the operator chooses to promote them into intel.
-- **Action:** Define a secret-output policy: default output fingerprints/paths/context/redacted values only; raw material requires explicit `--reveal` or clearly named reveal scripts. Add a promotion path that writes recovered key/token material to `workspace/intel/keys/` or `workspace/intel/secrets/` with 0600 permissions and records provenance. Update gather scripts and docs to match. Add tests/grep guard for banned default raw-secret patterns where practical.
-- **Files:** `.pi/skills/gather-playbooks/linux/ssh-keys.sh`, `.pi/skills/gather-playbooks/linux/triage.sh`, `.pi/skills/gather-playbooks/linux/enum-cloud-credentials.sh`, `.pi/skills/gather-playbooks/macos/ssh-keys.sh`, `.pi/skills/gather-playbooks/windows/enum-credentials.ps1`, `.pi/skills/gather-playbooks/windows/enum-cloud-credentials.ps1`, `.pi/skills/gather-playbooks/windows/enum-ad.ps1`, `docs/runbook.md`, `docs/intel-import-workflow.md`, `bin/smoke-check`
+*Nothing currently at P0.*
 
 ---
 
 ## 🟠 P1 — Fix before the next incident image is trusted
 
-### 14. Pin Docker builds — supply chain risk
-
-NetExec installs from GitHub HEAD. pi installs from npm latest. A CI build can silently change behavior. For a security tool, non-reproducible builds are a credibility problem.
-
-- **Action:** Pin NetExec to a specific commit/tag. Pin pi to a specific npm version. Pin Impacket to a version. Pin Node with `.nvmrc` and a Docker `ARG NODE_MAJOR`/version note matching CI. Document update cadence and a deliberate dependency-bump workflow.
-- **Files:** `Dockerfile`, `.nvmrc`, `.github/workflows/ci.yml`, README or CONTRIBUTING update cadence note
-
----
+*Nothing currently at P1.*
 
 ## 🟡 P2 — High operator leverage
 
-### 48. Evidence packaging should move from strategic idea to operator workflow
-
-At incident close, I need to hand off `workspace/intel`, audit logs, session logs, reports, and selected evidence. Today that is manual. Manual packaging means missed files and uncontrolled secret sprawl. This is core IR hygiene, not long-term wishlist.
-
-- **Dependency:** Do after #44. Packaging before secret-output cleanup just formalizes dirty logs into an archive.
-- **Action:** Build `bin/ir-package`: generate `ir-report`, collect intel/logs/evidence into a timestamped tarball, produce a manifest with SHA-256 hashes, and warn if active/unrotated credentials remain. Keep signing optional if no key is configured.
-- **Files:** `bin/ir-package`, `tests/python/test_ir_package.py`, `docs/runbook.md`, `README.md`
-
----
+*Nothing currently at P2.*
 
 ## 🟢 P3 — Simplify / de-risk maintenance
 
-### 20. Make nvim config optional in the image
-
-Adds image weight in non-interactive/CI deployments. Low risk and cheap after higher-risk incident workflow fixes.
-
-- **Action:** `ARG INCLUDE_NVIM_CONFIG=true`, conditional `COPY`. Keep default as `true`.
-- **Files:** `Dockerfile`, `.config/nvim/**`
-
----
-
-### 52. Consider tmux-backed remote sessions for simpler interaction + capture
-
-Past operator workflow used tmux capture for SSH/telnet. That model is attractive: one terminal owns the real interactive session, the agent sends keys, and capture-pane/pipe-pane becomes the log. It could simplify telnet/network-device handling and let humans attach to the same live session.
-
-Risks: command-boundary detection is harder than pipe markers, scrollback can truncate evidence, secrets stay in terminal history, concurrent `remote_exec` calls can race, and WinRM/PowerShell remoting should likely stay on the current command-oriented adapter.
-
-- **Dependency:** Do after #44. tmux scrollback/pipe-pane can amplify raw-secret leakage if reveal/default modes are not clear.
-- **Action:** Prototype optional `tmux` backend for SSH/telnet/network-device only: spawn session in named window/pane, `pipe-pane` to `${BRJOTSKEL_LOG_DIR}/remote-sessions`, send commands via `tmux send-keys`, collect output via `capture-pane`, and compare reliability against current marker-based adapter. Keep WinRM/PowerShell on the command adapter.
-- **Files:** `.pi/extensions/remote-session.ts`, `.pi/extensions/lib/protocol-adapters/**`, `Dockerfile` (tmux), `tests/node/**`, `docs/architecture.md`
+*Nothing currently at P3.*
 
 ---
 
@@ -102,6 +60,97 @@ Risks: command-boundary detection is harder than pipe markers, scrollback can tr
 ---
 
 ## Completed (archive)
+
+<details>
+<summary>Won't do — #20 nvim optionalization skipped</summary>
+
+- ⛔ **#20** Skipped by operator decision. Keep the nvim config baked into the incident image by default instead of adding conditional Docker build paths. The image-size win is low leverage, while preserving a consistent interactive recovery workspace is more useful during live incidents.
+
+</details>
+
+<details>
+<summary>Won't do — #52 tmux backend skipped</summary>
+
+- ⛔ **#52** Skipped by operator decision. The current command-oriented remote-session adapter remains the canonical path. The tmux model has useful human-attach ergonomics but adds command-boundary ambiguity, scrollback truncation risk, raw credential exposure in terminal/log history, and concurrency race surface. Keep WinRM/PowerShell on the current adapter and do not add tmux/Dockerfile complexity unless a future mission proves the need.
+
+</details>
+
+<details>
+<summary>P3 — #44 resolved</summary>
+
+- ✅ **#44** Made split secret handling explicit without blocking evidence. Credential-focused gather paths now have redacted-by-default modes where practical (`BRJOTSKEL_REVEAL_SECRETS=1` reveals raw material for validation/import): Linux cloud/credential/triage/container token paths, Windows cloud/credential paths, and macOS credential history/token searches. `ir-report` now warns that intel, transcripts, and packages may contain raw secrets and supports `--format json --redact-secrets` for shareable JSON exports. `ir-package` warning/manifest metadata now call out that logs may contain secrets outside `credentials.yaml` and preserves raw evidence instead of blocking on active credentials. README/runbook/import workflow docs updated; Python coverage added. Tests now 52 Python + 102 Node.
+
+</details>
+
+<details>
+<summary>P2 — #60 resolved</summary>
+
+- ✅ **#60** Generated extension tool inventory docs. Added `bin/check-tool-inventory` to extract `pi.registerTool({ name: ... })` from `.pi/extensions/*.ts`, rewrite marked README/architecture blocks with `--write`, and fail CI when docs drift. Wired it into `bin/test`, Docker image chmod/symlink setup, README/toolchain docs, architecture docs, and Python docs coverage. Current generated inventory tracks 17 registered extension tools across `intel-scan.ts`, `intel-store.ts`, and `remote-session.ts`.
+
+</details>
+
+<details>
+<summary>P2 — #59 resolved</summary>
+
+- ✅ **#59** Added strict TypeScript typechecking. New `tsconfig.json` runs `strict`/`noEmit`/unused checks across `.pi/extensions/**/*.ts`; `package.json` and `package-lock.json` pin TypeScript and Node types; `bin/test` installs compiler deps when missing and runs `node_modules/.bin/tsc --noEmit` before unit tests. CI now runs `npm ci --ignore-scripts`. Added local declaration stubs for pi/typebox extension APIs and Node coverage to keep the typecheck contract from drifting. Cleaned stale unused imports and typed intel category indexing/fallback host summaries caught by the compiler.
+
+</details>
+
+<details>
+<summary>P1 — #58 resolved</summary>
+
+- ✅ **#58** Finished build integrity beyond version pins. `Dockerfile` now records OCI image labels and writes `/opt/brjotskel/BUILD-MANIFEST.json` with pinned inputs, source metadata, tool versions, selected file hashes, dpkg inventory, pip freeze, npm global packages, pi package config, and known non-hermetic inputs. CI validates the manifest, generates `artifacts/brjotskel-sbom.cdx.json` with `bin/image-sbom`, and uploads the SBOM plus manifest. Docs now call out the remaining incident-release lane: controlled mirrors or hash-locked caches for Debian/Microsoft apt, PyPI, npm, and rustup.
+
+</details>
+
+<details>
+<summary>P1 — #57 resolved</summary>
+
+- ✅ **#57** Hardened the container trust boundary. `Dockerfile` now creates a non-root `brjotskel` runtime user with configurable UID/GID, leaves baked-in `.pi` settings/extensions/skills plus docs/bin/nvim config root-owned and read-only to runtime, allows only transient pi lock entries in the `.pi` parent, and limits case-data writes to logs/workspace/home. `compose.yaml` now passes UID/GID build args, sets `no-new-privileges:true`, drops all capabilities, and labels writable `.pi` live-reload as dirty/dev-only. README, architecture docs, and contributing guidance document production read-only `.pi` mode and local capability overrides.
+
+</details>
+
+<details>
+<summary>P1 — #48 resolved</summary>
+
+- ✅ **#48** Added `bin/ir-package` incident handoff workflow. It generates `incident-report.md`, copies `workspace/intel/`, `logs/`, and repeatable `--evidence` paths into a timestamped sensitive package, writes `MANIFEST.json` and `MANIFEST.sha256` with per-file SHA-256 hashes, excludes `.intel.lock`, sets output directory 0700 and tarball 0600, and warns on active/unrotated credentials via stderr and `WARNING.txt`. Added Python coverage and README/runbook/architecture docs. Tests now 49 Python + 101 Node.
+
+</details>
+
+<details>
+<summary>P1 — #56 resolved</summary>
+
+- ✅ **#56** Made logging evidence-grade enough for the next layer. `bin/ir-log` now writes `entry_hash` and `previous_entry_hash` for tamper-evident daily audit logs in text and JSONL modes. Remote session logging now fails loud by default, with explicit `BRJOTSKEL_ALLOW_DEGRADED_LOGGING=1` escape hatch. Every `remote_exec` completion/timeout writes a structured hash-chained JSONL command record with command ID, session/target/protocol, timing, status, output SHA-256, byte/line counts, duration, and taint state. Human-readable session logs remain. Added Python and Node coverage; tests now 46 Python + 101 Node.
+
+</details>
+
+<details>
+<summary>P1 — #55 resolved</summary>
+
+- ✅ **#55** Added cross-process intel store locking. New `.pi/extensions/lib/intel-lock.ts` uses an atomic directory lock at `.intel.lock`, serializes write sections across concurrent pi/tool processes, reclaims stale locks, times out on fresh held locks, and releases on errors. `intel-store.ts` now wraps every read-modify-write path, including credential access timeline writes. `intel-scan.ts` writes hosts and timeline under the same lock. Added `tests/node/intel-lock.test.mjs`; Node tests now 99.
+
+</details>
+
+<details>
+<summary>Won't do — #54 mission-boundary model accepted</summary>
+
+- ⛔ **#54** Scope allowlist enforcement closed as won't-do. Operator decision: brjotskel runs against a mission, not a static scope file. Authorized boundaries remain an operational/legal control, not an in-tool network allowlist. Keep command confirmations, provenance, and audit logging; do not add `workspace/scope.yaml` gating unless the mission model changes.
+
+</details>
+
+<details>
+<summary>P1 — #14 resolved</summary>
+
+- ✅ **#14** Docker/build dependencies pinned. `Dockerfile` now uses a Debian base digest and explicit pins for Node.js version + SHA-256, pi, `pi-smart-fetch`, PowerShell, and Rust. `requirements-harness.txt` pins Impacket, NetExec, direct Git dependencies, and Python transitives. Added `.nvmrc`, switched CI to `node-version-file`, pinned `.pi/settings.json` package spec, and documented the dependency bump workflow.
+
+</details>
+
+<details>
+<summary>P1 — #53 resolved</summary>
+
+- ✅ **#53** Added `bin/check-playbook-contracts`, wired it into `bin/test`, and normalized metadata across the 101 operator-facing target-side scripts. The checker validates required privilege/read-only/state-changing metadata, sensitive-output labels, predictable section headers, evidence/action/verify patterns, mutation guards, and banned target-side bootstrap/drop patterns. Added Python coverage that runs the checker, executes representative safe Linux read-only playbook output, verifies network-device command references, and confirms high-impact Windows dump scripts require `$ConfirmDump = $true`. CI now sets `BRJOTSKEL_REQUIRE_PWSH=1` so PowerShell syntax cannot silently skip in GitHub Actions.
+
+</details>
 
 <details>
 <summary>P2 — #26 resolved</summary>

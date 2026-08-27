@@ -31,6 +31,7 @@ class IrLogTests(unittest.TestCase):
             self.assertEqual(len(files), 1)
             content = files[0].read_text()
             self.assertIn("operator=unit-tester", content)
+            self.assertIn("entry_hash=", content)
             self.assertIn(r"event=checked\ host\ 10.0.0.5", content)
             self.assertRegex(content, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
 
@@ -101,6 +102,7 @@ class IrLogTests(unittest.TestCase):
             self.assertEqual(entry["operator"], "unit-tester")
             self.assertIn("host", entry)
             self.assertEqual(entry["event"], "netexec smb 10.10.0.0/24")
+            self.assertRegex(entry["entry_hash"], r"^[0-9a-f]{64}$")
             self.assertNotIn("auth", entry)  # no auth context set
 
     def test_jsonl_includes_auth_context_when_set(self):
@@ -124,6 +126,24 @@ class IrLogTests(unittest.TestCase):
             entry = json.loads(log_file.read_text().strip())
             self.assertEqual(entry["auth"], "corp/alice")
             self.assertEqual(entry["event"], "pivot to dc01")
+
+    def test_hash_chain_links_multiple_entries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = os.environ.copy()
+            env["BRJOTSKEL_LOG_DIR"] = tmpdir
+            env["BRJOTSKEL_LOG_FORMAT"] = "jsonl"
+
+            subprocess.run(["bash", str(SCRIPT), "first"], cwd=REPO_ROOT, env=env, check=True)
+            subprocess.run(["bash", str(SCRIPT), "second"], cwd=REPO_ROOT, env=env, check=True)
+
+            log_file = next(Path(tmpdir).glob("audit-*.log"))
+            entries = [json.loads(line) for line in log_file.read_text().splitlines()]
+            self.assertEqual(len(entries), 2)
+            self.assertNotIn("previous_entry_hash", entries[0])
+            self.assertRegex(entries[0]["entry_hash"], r"^[0-9a-f]{64}$")
+            self.assertRegex(entries[1]["previous_entry_hash"], r"^[0-9a-f]{64}$")
+            self.assertRegex(entries[1]["entry_hash"], r"^[0-9a-f]{64}$")
+            self.assertNotEqual(entries[0]["entry_hash"], entries[1]["entry_hash"])
 
     def test_jsonl_event_with_special_characters(self):
         with tempfile.TemporaryDirectory() as tmpdir:

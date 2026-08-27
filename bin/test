@@ -4,6 +4,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 bash bin/smoke-check
+if [[ -f tsconfig.json ]]; then
+  if [[ ! -x node_modules/.bin/tsc ]]; then
+    npm ci --ignore-scripts
+  fi
+  node_modules/.bin/tsc --noEmit
+fi
 bin/check-playbook-inventory
+bin/check-tool-inventory
+bin/check-playbook-contracts
 python3 -m unittest discover -s tests/python -v
 node --test --experimental-strip-types tests/node/*.test.mjs

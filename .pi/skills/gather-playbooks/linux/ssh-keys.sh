@@ -2,6 +2,7 @@
 # gather/linux/ssh-keys.sh — Collect SSH keys, authorized_keys, known_hosts
 # Requires: read access to user home directories
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1552.004 — Unsecured Credentials: Private Keys
 
 echo "=== SSH DIRECTORIES ==="

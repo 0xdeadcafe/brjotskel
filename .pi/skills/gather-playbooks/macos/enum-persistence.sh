@@ -1,4 +1,8 @@
 #!/bin/sh
+# gather/macos/enum-persistence.sh — Detect macOS persistence mechanisms
+# Requires: Standard user (root improves system coverage)
+# Read-only: YES
+# Purpose: Find launchd, cron, profiles, shell hooks, login items, and other persistence clues.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

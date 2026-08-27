@@ -2,15 +2,45 @@
 # gather/linux/triage.sh — Full triage runner (combines all gather playbooks)
 # Requires: root for full coverage
 # Read-only: YES (except hashdump which only reads files)
+# Sensitive-output: YES — redacted by default; set BRJOTSKEL_REVEAL_SECRETS=1 to print raw material
 # Usage: Upload and run, or pipe: sh -c "$(cat triage.sh)"
 #
 # This is a meta-script that inlines all gather functionality.
 # For selective gathering, use individual scripts instead.
 
+set -u
+REVEAL_SECRETS="${BRJOTSKEL_REVEAL_SECRETS:-0}"
+redact_stream() {
+  if [ "$REVEAL_SECRETS" = "1" ]; then
+    cat
+  else
+    sed -E \
+      -e 's/(aws_secret_access_key[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/Ig' \
+      -e 's/(token[[:space:]]*[=:][[:space:]]*)[^[:space:]",]+/\1<redacted>/Ig' \
+      -e 's/(secret[[:space:]]*[=:][[:space:]]*)[^[:space:]",]+/\1<redacted>/Ig' \
+      -e 's/(password[[:space:]]*[=:][[:space:]]*)[^[:space:]",]+/\1<redacted>/Ig' \
+      -e 's#(https?://[^:/]+:)[^@]+@#\1<redacted>@#Ig' \
+      -e 's/-----BEGIN [^-]*PRIVATE KEY-----/<private key block redacted; set BRJOTSKEL_REVEAL_SECRETS=1>/Ig' \
+      -e 's/-----END [^-]*PRIVATE KEY-----/<private key block redacted end>/Ig'
+  fi
+}
+show_secret_file() {
+  f="$1"
+  if [ "$REVEAL_SECRETS" = "1" ]; then
+    cat "$f" 2>/dev/null
+  elif grep -q 'BEGIN .*PRIVATE KEY' "$f" 2>/dev/null; then
+    printf '[REDACTED] %s private key content hidden. Set BRJOTSKEL_REVEAL_SECRETS=1 to reveal.\n' "$f"
+  else
+    printf '[REDACTED] %s present; raw values hidden. Set BRJOTSKEL_REVEAL_SECRETS=1 to reveal.\n' "$f"
+    sed -n '1,20p' "$f" 2>/dev/null | redact_stream
+  fi
+}
+
 echo "========================================"
 echo "  BRJOTSKEL LINUX TRIAGE"
 echo "  Host: $(hostname) | User: $(whoami)"
 echo "  Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  Secret output: $([ "$REVEAL_SECRETS" = "1" ] && echo 'REVEAL enabled' || echo 'REDACTED; set BRJOTSKEL_REVEAL_SECRETS=1 to reveal raw values')"
 echo "========================================"
 echo ""
 
@@ -64,14 +94,18 @@ echo "================================================================"
 echo "  SECTION: CREDENTIALS"
 echo "================================================================"
 echo "=== SHADOW ==="
-cat /etc/shadow 2>/dev/null || echo "[!] No access to /etc/shadow"
+if [ "$REVEAL_SECRETS" = "1" ]; then
+  cat /etc/shadow 2>/dev/null || echo "[!] No access to /etc/shadow"
+else
+  awk -F: '{print $1 ":" ($2 ~ /^[$]/ ? "<hash-present>" : $2)}' /etc/shadow 2>/dev/null || echo "[!] No access to /etc/shadow"
+fi
 
 echo ""
 echo "=== SSH PRIVATE KEYS ==="
 cut -d: -f6 /etc/passwd 2>/dev/null | sort -u | while IFS= read -r d; do
   [ -d "$d/.ssh" ] || continue
   for key in id_rsa id_ed25519 id_ecdsa id_dsa; do
-    [ -f "$d/.ssh/$key" ] && echo "--- $d/.ssh/$key ---" && cat "$d/.ssh/$key" 2>/dev/null
+    [ -f "$d/.ssh/$key" ] && echo "--- $d/.ssh/$key ---" && show_secret_file "$d/.ssh/$key"
   done
 done
 
@@ -84,8 +118,8 @@ done
 echo ""
 echo "=== AWS / CLOUD CREDS ==="
 cut -d: -f6 /etc/passwd 2>/dev/null | sort -u | while IFS= read -r d; do
-  [ -f "$d/.aws/credentials" ] && echo "--- $d/.aws/credentials ---" && cat "$d/.aws/credentials" 2>/dev/null
-  [ -f "$d/.kube/config" ] && echo "--- $d/.kube/config ---" && cat "$d/.kube/config" 2>/dev/null
+  [ -f "$d/.aws/credentials" ] && echo "--- $d/.aws/credentials ---" && show_secret_file "$d/.aws/credentials"
+  [ -f "$d/.kube/config" ] && echo "--- $d/.kube/config ---" && show_secret_file "$d/.kube/config"
 done
 
 echo ""
@@ -93,7 +127,7 @@ echo "=== HISTORY (passwords) ==="
 cut -d: -f6 /etc/passwd 2>/dev/null | sort -u | while IFS= read -r d; do
   for f in .bash_history .zsh_history; do
     [ -f "$d/$f" ] || continue
-    grep -inE "pass|secret|token|curl.*-u|mysql.*-p|sshpass" "$d/$f" 2>/dev/null | tail -10 && echo "  ^ $d/$f"
+    grep -inE "pass|secret|token|curl.*-u|mysql.*-p|sshpass" "$d/$f" 2>/dev/null | tail -10 | redact_stream && echo "  ^ $d/$f"
   done
 done
 

@@ -1,6 +1,7 @@
 # gather/windows/putty-sessions.ps1 — Enumerate PuTTY/Pageant session artifacts
 # Requires: Registry read access to user hives
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1552 / T1021
 
 $ErrorActionPreference = 'SilentlyContinue'

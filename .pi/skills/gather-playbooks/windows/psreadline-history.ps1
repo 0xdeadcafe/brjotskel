@@ -1,6 +1,7 @@
 # gather/windows/psreadline-history.ps1 — Enumerate PSReadLine history across user profiles
 # Requires: Read access to user profile AppData paths
 # Read-only: YES
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
 # MITRE ATT&CK: T1059.001 / T1552
 
 $ErrorActionPreference = 'SilentlyContinue'

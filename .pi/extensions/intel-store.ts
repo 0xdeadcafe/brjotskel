@@ -22,13 +22,35 @@
 import { readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { normalizeIntelEntry, validateIntelEntry, validateIntelStatusTransition, resolveStoredPath, resolveIntelDir } from "./lib/intel-helpers.ts";
+import { normalizeIntelEntry, validateIntelEntry, validateIntelStatusTransition, resolveStoredPath, resolveIntelDir, type IntelCategory } from "./lib/intel-helpers.ts";
 import { ensurePrivateDir, ensurePrivateFile, hardenExistingPrivateFiles } from "./lib/intel-permissions.ts";
+import { withIntelFileLock } from "./lib/intel-lock.ts";
 import { parseYaml as parseYamlDocument, dumpYaml } from "./lib/simple-yaml.ts";
 import { getFileMap, getCollectionKeyMap, addIntelRecord, updateIntelRecord, appendTimelineEntry, formatHostQueryResult, formatCredentialQueryResult, searchIntel, formatSearchResult, buildIntelSummary, buildIntelMap, filterTimeline, isInactiveCredentialStatus, timelineActionForIntelUpdate } from "./lib/intel-store-core.ts";
 import { credValidationCmds } from "./lib/operator-shortcuts.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+type IntelAddParams = { category: IntelCategory; id: string; data: string; summary?: string; overwrite?: boolean };
+type IntelUpdateParams = { category: IntelCategory; id: string; fields: string; summary?: string; replace_arrays?: boolean; force?: boolean };
+type IntelQueryParams = {
+  query_type: "for_host" | "for_credential" | "all_hosts" | "all_credentials" | "all_accounts" | "all_pivots" | "search";
+  target?: string;
+  keyword?: string;
+};
+type IntelGetCredParams = { id: string };
+type IntelTimelineParams = {
+  action: "add" | "view";
+  entry_type?: string;
+  entry_action?: string;
+  target?: string;
+  summary?: string;
+  count?: number;
+  filter_host?: string;
+  filter_category?: string;
+  filter_action?: string;
+  filter_since?: string;
+};
 
 // -------------------------------------------------------------------
 // Paths
@@ -77,8 +99,8 @@ function writeYaml(filePath: string, data: any): void {
 
 let intelWriteChain: Promise<unknown> = Promise.resolve();
 
-function withIntelWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
-  const next = intelWriteChain.then(fn, fn) as Promise<T>;
+function withIntelWriteLock<T>(intelDir: string, fn: () => T | Promise<T>): Promise<T> {
+  const next = intelWriteChain.then(() => withIntelFileLock(intelDir, fn), () => withIntelFileLock(intelDir, fn)) as Promise<T>;
   intelWriteChain = next.then(() => undefined, () => undefined);
   return next;
 }
@@ -120,15 +142,16 @@ export default function (pi: ExtensionAPI) {
       overwrite: Type.Optional(Type.Boolean({ description: "Allow replacing an existing entry with the same ID (default: false)" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelAddParams, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
+      const category = params.category as IntelCategory;
 
-      const filePath = join(intelDir, getFileMap()[params.category]);
-      const key = getCollectionKeyMap()[params.category];
-      const entryData = normalizeIntelEntry(params.category, parseYaml(params.data, `intel_add:${params.category}:${params.id}`));
-      validateIntelEntry(params.category, entryData);
+      const filePath = join(intelDir, getFileMap()[category]);
+      const key = getCollectionKeyMap()[category];
+      const entryData = normalizeIntelEntry(category, parseYaml(params.data, `intel_add:${category}:${params.id}`));
+      validateIntelEntry(category, entryData);
 
-      const total = await withIntelWriteLock(async () => {
+      const total = await withIntelWriteLock(intelDir, async () => {
         const store = readYaml(filePath);
         const updatedStore = addIntelRecord(store, key, params.id, entryData, { overwrite: params.overwrite === true });
         writeYaml(filePath, updatedStore);
@@ -148,7 +171,7 @@ export default function (pi: ExtensionAPI) {
 
       // For credentials: surface a validation hint if known hosts exist
       let validationHint = "";
-      if (params.category === "credential") {
+      if (category === "credential") {
         try {
           const hosts = readYaml(join(intelDir, "hosts.yaml")).hosts || {};
           const hostIps = Object.values(hosts as Record<string, any>)
@@ -198,17 +221,18 @@ export default function (pi: ExtensionAPI) {
       force: Type.Optional(Type.Boolean({ description: "Allow otherwise discouraged lifecycle correction transitions (default: false)" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelUpdateParams, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
-      const filePath = join(intelDir, getFileMap()[params.category]);
-      const key = getCollectionKeyMap()[params.category];
-      const rawUpdates = parseYaml(params.fields, `intel_update:${params.category}:${params.id}`);
+      const category = params.category as IntelCategory;
+      const filePath = join(intelDir, getFileMap()[category]);
+      const key = getCollectionKeyMap()[category];
+      const rawUpdates = parseYaml(params.fields, `intel_update:${category}:${params.id}`);
       if (!rawUpdates || typeof rawUpdates !== "object" || Array.isArray(rawUpdates) || Object.keys(rawUpdates).length === 0) {
         throw new Error("intel_update fields must be a non-empty YAML object/map.");
       }
       const updates = normalizeIntelEntry(params.category, rawUpdates, { partial: true });
 
-      const result = await withIntelWriteLock(async () => {
+      const result = await withIntelWriteLock(intelDir, async () => {
         const store = readYaml(filePath);
         const existing = store[key]?.[params.id];
         if (!existing) throw new Error(`Intel entry '${params.id}' not found in '${key}'. Use intel_add for new entries.`);
@@ -271,7 +295,7 @@ export default function (pi: ExtensionAPI) {
       keyword: Type.Optional(Type.String({ description: "Search keyword (for query_type='search')" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelQueryParams, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
 
       const hosts = readYaml(join(intelDir, "hosts.yaml")).hosts || {};
@@ -357,62 +381,62 @@ export default function (pi: ExtensionAPI) {
       id: Type.String({ description: "Credential ID from credentials.yaml" }),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelGetCredParams, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
-      const credentials = readYaml(join(intelDir, "credentials.yaml")).credentials || {};
 
-      const cred = credentials[params.id];
-      if (!cred) {
-        const available = Object.keys(credentials).join(", ");
-        throw new Error(`Credential '${params.id}' not found. Available: ${available || "none"}`);
-      }
+      const result = await withIntelWriteLock(intelDir, async () => {
+        const credentials = readYaml(join(intelDir, "credentials.yaml")).credentials || {};
+        const cred = credentials[params.id];
+        if (!cred) {
+          const available = Object.keys(credentials).join(", ");
+          throw new Error(`Credential '${params.id}' not found. Available: ${available || "none"}`);
+        }
 
-      if (isInactiveCredentialStatus(cred.status)) {
-        throw new Error(`Credential '${params.id}' has inactive status '${cred.status}'. Refusing to retrieve secret; rotate/validate or update the intel entry before operational use.`);
-      }
+        if (isInactiveCredentialStatus(cred.status)) {
+          throw new Error(`Credential '${params.id}' has inactive status '${cred.status}'. Refusing to retrieve secret; rotate/validate or update the intel entry before operational use.`);
+        }
 
-      const lines: string[] = [
-        `Credential: ${params.id}`,
-        `Type: ${cred.type}`,
-        `Username: ${cred.username}`,
-        `Domain: ${cred.domain || "(local)"}`,
-      ];
+        const lines: string[] = [
+          `Credential: ${params.id}`,
+          `Type: ${cred.type}`,
+          `Username: ${cred.username}`,
+          `Domain: ${cred.domain || "(local)"}`,
+        ];
 
-      switch (cred.type) {
-        case "password":
-          lines.push(`Secret: ${cred.secret}`);
-          lines.push(`Usage: ssh ${cred.username}@<host> or use in remote_connect`);
-          break;
-        case "ntlm-hash":
-          lines.push(`Hash: ${cred.secret}`);
-          lines.push(`Usage: secretsdump.py -hashes ${cred.secret} ${cred.domain}/${cred.username}@<host>`);
-          lines.push(`  or: proxychains wmiexec.py -hashes ${cred.secret} ${cred.domain}/${cred.username}@<host>`);
-          break;
-        case "ssh-key":
-          const keyPath = resolveStoredPath(intelDir, cred.key_file);
-          lines.push(`Key file: ${keyPath}`);
-          lines.push(`Passphrase: ${cred.passphrase || "(none)"}`);
-          lines.push(`Usage: ssh -i ${keyPath} ${cred.username}@<host>`);
-          lines.push(`  or: remote_connect(identity="${keyPath}", ...)`);
-          break;
-        case "kerberos-tgt":
-        case "kerberos-tgs":
-          const ticketPath = resolveStoredPath(intelDir, cred.ticket_file);
-          lines.push(`Ticket: ${ticketPath}`);
-          lines.push(`Expires: ${cred.expires || "unknown"}`);
-          lines.push(`Usage: export KRB5CCNAME=${ticketPath} && psexec.py -k -no-pass ${cred.domain}/${cred.username}@<host>`);
-          break;
-        case "token":
-          lines.push(`Token: ${cred.secret}`);
-          break;
-        default:
-          lines.push(`Secret: ${cred.secret || "(see file)"}`);
-      }
+        switch (cred.type) {
+          case "password":
+            lines.push(`Secret: ${cred.secret}`);
+            lines.push(`Usage: ssh ${cred.username}@<host> or use in remote_connect`);
+            break;
+          case "ntlm-hash":
+            lines.push(`Hash: ${cred.secret}`);
+            lines.push(`Usage: secretsdump.py -hashes ${cred.secret} ${cred.domain}/${cred.username}@<host>`);
+            lines.push(`  or: proxychains wmiexec.py -hashes ${cred.secret} ${cred.domain}/${cred.username}@<host>`);
+            break;
+          case "ssh-key":
+            const keyPath = resolveStoredPath(intelDir, cred.key_file);
+            lines.push(`Key file: ${keyPath}`);
+            lines.push(`Passphrase: ${cred.passphrase || "(none)"}`);
+            lines.push(`Usage: ssh -i ${keyPath} ${cred.username}@<host>`);
+            lines.push(`  or: remote_connect(identity="${keyPath}", ...)`);
+            break;
+          case "kerberos-tgt":
+          case "kerberos-tgs":
+            const ticketPath = resolveStoredPath(intelDir, cred.ticket_file);
+            lines.push(`Ticket: ${ticketPath}`);
+            lines.push(`Expires: ${cred.expires || "unknown"}`);
+            lines.push(`Usage: export KRB5CCNAME=${ticketPath} && psexec.py -k -no-pass ${cred.domain}/${cred.username}@<host>`);
+            break;
+          case "token":
+            lines.push(`Token: ${cred.secret}`);
+            break;
+          default:
+            lines.push(`Secret: ${cred.secret || "(see file)"}`);
+        }
 
-      lines.push(`Valid on: ${(cred.valid_on || []).join(", ")}`);
-      lines.push(`Status: ${cred.status}`);
+        lines.push(`Valid on: ${(cred.valid_on || []).join(", ")}`);
+        lines.push(`Status: ${cred.status}`);
 
-      await withIntelWriteLock(async () => {
         appendTimeline(intelDir, {
           timestamp: new Date().toISOString(),
           type: "credential",
@@ -421,11 +445,16 @@ export default function (pi: ExtensionAPI) {
           summary: `Credential secret accessed for operational use: ${params.id}`,
           operator: process.env.USER || "unknown",
         });
+
+        return {
+          lines,
+          details: { id: params.id, type: cred.type, username: cred.username, valid_on: cred.valid_on },
+        };
       });
 
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        details: { id: params.id, type: cred.type, username: cred.username, valid_on: cred.valid_on },
+        content: [{ type: "text", text: result.lines.join("\n") }],
+        details: result.details,
       };
     },
   });
@@ -451,7 +480,7 @@ export default function (pi: ExtensionAPI) {
       filter_since: Type.Optional(Type.String({ description: "Filter view to entries at or after this ISO datetime, e.g. 2026-08-25T10:00:00Z" })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params: IntelTimelineParams, _signal, _onUpdate, _ctx) {
       const intelDir = getIntelDir();
       const timelinePath = join(intelDir, "timeline.yaml");
       const timeline = readYaml(timelinePath);
@@ -459,7 +488,7 @@ export default function (pi: ExtensionAPI) {
 
       if (params.action === "add") {
         if (!params.summary) throw new Error("'summary' is required when adding a timeline entry");
-        await withIntelWriteLock(async () => {
+        await withIntelWriteLock(intelDir, async () => {
           const current = readYaml(timelinePath);
           if (!current.timeline) current.timeline = [];
           current.timeline.push({

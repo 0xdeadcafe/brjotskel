@@ -1,4 +1,8 @@
 #!/bin/sh
+# host-ir/linux/initial-assessment.sh — Initial Linux host IR assessment
+# Requires: Standard user (root improves coverage)
+# Read-only: YES
+# Purpose: Assess host role, live activity, persistence clues, recent execution, and security state.
 set -u
 
 sec(){ printf '\n=== %s ===\n' "$1"; }

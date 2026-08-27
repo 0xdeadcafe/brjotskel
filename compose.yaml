@@ -19,10 +19,17 @@ x-brjotskel-base: &brjotskel-base
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      BRJOTSKEL_UID: ${BRJOTSKEL_UID:-1000}
+      BRJOTSKEL_GID: ${BRJOTSKEL_GID:-1000}
   image: brjotskel:local
   stdin_open: true
   tty: true
   restart: "no"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
   env_file:
     - path: .env
       required: false
@@ -45,6 +52,7 @@ services:
     profiles: [shell]
 
   # ── Dev: agent with .pi/ live-reloaded ────────────────────────────────────
+  # DIRTY/DEV-ONLY: bind-mounts executable .pi/ code writable from the host.
   # Extensions and playbooks reflect edits without a rebuild.
   # docker compose run --rm dev
   dev:

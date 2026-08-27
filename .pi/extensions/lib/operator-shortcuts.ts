@@ -302,7 +302,7 @@ export function credValidationCmds(type: string, username: string, id: string, h
 function secretsDumpCmds(cred: PursueCredentialSummary, intel: PursueIntelSnapshot): string[] {
   if (cred.type !== "ntlm-hash" || !cred.validOn || cred.validOn.length === 0) return [];
 
-  const hosts = intel.knownHosts || intel.knownHostIds.map((id, idx) => ({ id, ip: intel.knownHostIps[idx] }));
+  const hosts: PursueHostSummary[] = intel.knownHosts || intel.knownHostIds.map((id, idx) => ({ id, ip: intel.knownHostIps[idx] }));
   const targets: string[] = [];
   const seen = new Set<string>();
 

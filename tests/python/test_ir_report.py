@@ -147,6 +147,32 @@ class TestIrReportBasic(unittest.TestCase):
             parsed = json.loads(result.stdout)
             self.assertIn("dc01", parsed["hosts"])
 
+    def test_json_redact_secrets_masks_credential_material(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(
+                tmp,
+                credentials={"svc": {"type": "password", "username": "svc",
+                                      "status": "active", "source": {"method": "test"},
+                                      "secret": "Winter2024!",
+                                      "access_token": "token-123"}},
+            )
+            result = run_report("--format", "json", "--redact-secrets", intel_dir=d)
+            self.assertEqual(result.returncode, 0)
+            parsed = json.loads(result.stdout)
+            self.assertTrue(parsed["redacted"])
+            self.assertEqual(parsed["credentials"]["svc"]["secret"], "<redacted>")
+            self.assertEqual(parsed["credentials"]["svc"]["access_token"], "<redacted>")
+            self.assertNotIn("Winter2024", result.stdout)
+            self.assertNotIn("token-123", result.stdout)
+
+    def test_markdown_warns_logs_and_intel_are_sensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intel_dir(tmp)
+            result = run_report(intel_dir=d)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("Sensitive evidence notice", result.stdout)
+            self.assertIn("remote session transcripts", result.stdout)
+
     def test_output_to_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = make_intel_dir(tmp)
