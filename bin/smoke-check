@@ -75,11 +75,11 @@ else
 fi
 
 announce "banned-pattern checks"
-if rg -n "BRJOTSKEL_AUTH_CONTEXT|ensureAuthContext" .pi/extensions/remote-session.ts >/dev/null; then
+if git grep -n -E "BRJOTSKEL_AUTH_CONTEXT|ensureAuthContext" -- .pi/extensions/remote-session.ts >/dev/null; then
   echo "Found deprecated auth-context reference(s)"
   exit 1
 fi
-if rg -n "crackmapexec|CrackMapExec" README.md docs .pi/extensions .pi/skills >/dev/null; then
+if git grep -n -E "crackmapexec|CrackMapExec" -- README.md docs .pi/extensions .pi/skills >/dev/null; then
   echo "Found stale CrackMapExec references; use netexec consistently"
   exit 1
 fi
@@ -91,16 +91,16 @@ for path in bin/build-manifest bin/image-sbom; do
     exit 1
   fi
 done
-if [[ -f Dockerfile ]] && ! rg -q "/opt/brjotskel/BUILD-MANIFEST.json" Dockerfile; then
+if [[ -f Dockerfile ]] && ! grep -q "/opt/brjotskel/BUILD-MANIFEST.json" Dockerfile; then
   echo "Dockerfile must generate /opt/brjotskel/BUILD-MANIFEST.json" >&2
   exit 1
 fi
 if [[ -f .github/workflows/ci.yml ]]; then
-  if ! rg -q "bin/image-sbom brjotskel:ci" .github/workflows/ci.yml; then
+  if ! grep -q "bin/image-sbom brjotskel:ci" .github/workflows/ci.yml; then
     echo "CI must generate an SBOM artifact with bin/image-sbom" >&2
     exit 1
   fi
-  if ! rg -q "brjotskel-build-integrity|upload-artifact" .github/workflows/ci.yml; then
+  if ! grep -E -q "brjotskel-build-integrity|upload-artifact" .github/workflows/ci.yml; then
     echo "CI must upload build integrity artifacts" >&2
     exit 1
   fi
